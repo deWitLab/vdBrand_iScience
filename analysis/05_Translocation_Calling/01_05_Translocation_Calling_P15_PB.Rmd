@@ -1,0 +1,530 @@
+---
+title: "Calling Translocations"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+params:
+  donor: P15_PB
+  resolution: 500000
+  threshold: 100
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(here)
+library(ggplot2)
+library(scales)
+library(GENOVA)
+library(data.table)
+library(EBImage)
+
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+sample <- donor <- params$donor
+files <- list.files(
+  here("data", "hic", "pools"),
+  full.names = TRUE, pattern = donor
+)
+exp <- list(load_contacts(
+  signal_path = files[1],
+  resolution = params$resolution,
+  scale_bp = NULL,
+  balancing = FALSE
+))
+names(exp) <- donor
+exp[[donor]]$MAT <- exp[[donor]]$MAT[V3 != 0]
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+### Functions
+
+```{r}
+sweep_chroms <- function(data, chroms, bins, FUN, ...) {
+  
+  grid <- t(combn(chroms, 2))
+  chr_idx <- split(bins$index, bins$V1)
+  
+  for (i in seq_len(nrow(grid))) {
+    
+    chr1 <- chr_idx[[grid[i, 1]]]
+    chr2 <- chr_idx[[grid[i, 2]]]
+    
+    dat <- data[chr1, chr2]
+    
+    res <- FUN(dat, ...)
+    
+    data[chr1, chr2] <- res
+  }
+  
+  data
+}
+```
+
+## Aim
+
+Try to detect translocations in patient Hi-Cs.
+
+## Raw
+
+```{r}
+good_chroms <- paste0("chr", c(1:22, "X"))
+bins <- exp[[donor]]$IDX
+bins <- bins[bins$V1 %in% good_chroms]
+bins <- bins[order(factor(bins$V1, good_chroms))]
+
+data <- exp[[donor]]$MAT
+
+# Filter out under-utilised bins
+obs_per_bin <- integer(nrow(bins))
+t1 <- table(data$V1)
+t1 <- t1[as.integer(names(t1)) %in% bins$V4]
+obs_per_bin[match(as.integer(names(t1)), bins$V4)] <- as.vector(t1)
+t2 <- table(data$V2)
+t2 <- t2[as.integer(names(t2)) %in% bins$V4]
+obs_per_bin[match(as.integer(names(t2)), bins$V4)] <- 
+ obs_per_bin[match(as.integer(names(t2)), bins$V4)] + as.vector(t2)
+
+bins <- bins[obs_per_bin > 2000,]
+bins[, index := seq_len(nrow(bins))]
+
+# Set trans-join
+join <- CJ(bins$V4, bins$V4)
+join <- join[V2 >= V1]
+join <- join[!bins$V1[match(V1, bins$V4)] == bins$V1[match(V2, bins$V4)]]
+
+# Select data
+data <- data[join]
+data[is.na(V3), V3 := 0]
+
+data[, V1 := match(V1, bins$V4)]
+data[, V2 := match(V2, bins$V4)]
+```
+
+### Display
+
+```{r}
+df <- rbind(
+  data,
+  setNames(data, c("V2", "V1", "V3"))[, c("V1", "V2", "V3"), with = FALSE]
+)
+
+ggplot(df, aes(V1, V2, fill = V3)) +
+  geom_raster() +
+  scale_fill_cis(
+    name = "Contacts",
+    limits = c(0, 50)
+  ) +
+  scale_y_continuous(
+    trans = "reverse"
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  ggtitle("Raw contacts") +
+  theme_void() +
+  theme(aspect.ratio = 1)
+```
+
+## De-CNV
+
+```{r}
+tab <- table(c(data$V1, data$V2))
+t1 <- data[, .(V3 = sum(V3)), by = "V1"]
+t2 <- data[, .(V3 = sum(V3)), by = "V2"]
+bin_means <- merge.data.table(t1, t2, by.x = "V1", by.y = "V2", all = TRUE)
+bin_means[is.na(V3.x), V3.x := 0]
+bin_means[is.na(V3.y), V3.y := 0]
+bin_means <- bin_means[, .(V1, V3 = V3.x + V3.y)]
+bin_means[, V3 := V3 / as.vector(tab)[V1]]
+bin_means[, V3 := V3 / sum(V3)]
+
+total_sum <- sum(data$V3)
+
+data[, bin_x := log10(bin_means$V3)[match(V1, bin_means$V1)]]
+data[, bin_y := log10(bin_means$V3)[match(V2, bin_means$V1)]]
+
+set.seed(42)
+sample <- sample(nrow(data), 1e5)
+fit <- MASS::glm.nb(
+  V3 ~ bin_x * bin_y,
+  data = data, subset = sample
+)
+
+pseudo_count <- 20
+pred <- predict(fit, newdata = data, type = 'response')
+data$res <- log2((data$V3 + pseudo_count) / (pred + pseudo_count))
+```
+
+### Display
+
+```{r}
+df <- data[, c("V1", "V2", "res"), with = FALSE]
+
+df <- rbind(
+  df,
+  setNames(df, c("V2", "V1", "res"))[, c("V1", "V2","res"), with = FALSE]
+)
+
+ggplot(df, aes(V1, V2, fill = res)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    colours = GENOVA:::bezier_corrected_divergent,
+    name = "Copy number\nCorrected",
+    limits = c(-2, 2), oob = oob_squish
+  ) +
+  scale_y_continuous(
+    trans = "reverse"
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  ggtitle("Corrected contacts") +
+  theme_void() +
+  theme(aspect.ratio = 1)
+```
+
+## Decompartmentalise
+
+```{r}
+mat <- matrix(0, nrow(bins), nrow(bins))
+mat[data[, cbind(V1, V2)]] <- data$res
+mat[data[, cbind(V2, V1)]] <- data$res
+
+eig <- RSpectra::eigs_sym(mat, 1, which = "LA")
+eig <- tcrossprod(eig$vectors)
+
+data[, eig := eig[cbind(V1, V2)]]
+fit <- MASS::rlm(res ~ 0 + eig, data = data)
+data[, eigres := residuals(fit)]
+
+df <- data[, c("V1", "V2", "eigres"), with = FALSE]
+df <- rbind(
+  df,
+  setNames(df, c("V2", "V1", "eigres"))
+)
+
+ggplot(df, aes(V1, V2, fill = eigres)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    colours = GENOVA:::bezier_corrected_divergent,
+    name = "Contacts",
+    limits = c(-6, 6), oob = oob_squish
+  ) +
+  scale_y_continuous(
+    trans = "reverse"
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  ggtitle("Decompartmentalised") +
+  theme_void() +
+  theme(aspect.ratio = 1)
+```
+
+## Use kernels
+
+### Define kernels
+
+```{r}
+kern1 <- matrix(c(
+  75,  150, 300,  0, -300,  -150, -75,
+  150, 300, 600,  0, -600,  -300, -150,
+  300, 600, 1200, 0, -1200, -600, -300,
+  0,   0,   0,    0, 0,     0,    0,
+  -300, -600, -1200, 0, -1200, -600, -300,
+  -150, -300, -600,  0, -600,  -300, -150,
+  -75,  -150, -300,  0, -300, -150, -75
+), 7, 7)
+
+kern2 <- apply(kern1, 1, rev)
+kern3 <- t(kern2)
+kern4 <- kern1
+kern4[] <- rev(kern4)
+
+kernels <- list(kern1, kern2, kern3, kern4)
+
+df <- lapply(kernels, reshape2::melt)
+df <- rbindlist(df, idcol = "kernel")
+
+ggplot(df, aes(Var1, Var2, fill = value)) +
+  geom_raster() +
+  geom_text(aes(label = value), size = 3) +
+  scale_fill_GENOVA_div(
+    midpoint = 0, name = "Weight"
+  ) +
+  facet_wrap(~ kernel) +
+  coord_cartesian(expand = FALSE) +
+  labs(x = "x", y = "y") +
+  theme(panel.border = element_rect(colour = "black", fill = NA))
+```
+
+### Sweep
+
+```{r}
+mat[] <- 0
+mat[data[, cbind(V1, V2)]] <- pmax(data$eigres, 0)
+lim <- range(mat)
+
+new_mat <- sweep_chroms(mat, good_chroms, bins, function(img) {
+  img <- Image(rescale(img, from = lim), dim = dim(img), "Grayscale")
+  img <- medianFilter(img, 3)
+  img <- lapply(kernels, function(k) {
+    pmax(imageData(filter2(img, k, "replicate")), 1)
+  })
+  Reduce(`+`, img)
+})
+
+```
+
+### Display
+
+```{r}
+df <- reshape2::melt(new_mat)
+
+ggplot(df, aes(Var1, Var2, fill = value)) +
+  geom_raster() +
+  scale_fill_viridis_c(limits = c(0, 1000), oob = oob_squish) +
+  scale_y_reverse() +
+  theme_void() +
+  theme(aspect.ratio = 1)
+```
+
+## Thresholding
+
+```{r}
+new_upper <- data.table(
+  x = row(new_mat)[upper.tri(new_mat)],
+  y = col(new_mat)[upper.tri(new_mat)],
+  z = new_mat[upper.tri(new_mat)]
+)
+
+vals <- sort(as.vector(new_upper$z))
+diff <- diff(vals)
+
+rle <- rle(diff > mean(diff))
+rle$values[rle$lengths == 1] <- !rle$values[rle$lengths == 1]
+rle <- rle(rep.int(rle$values, rle$lengths))
+ends <- cumsum(rle$lengths)
+starts <- ends - rle$lengths + 1
+thres <- vals[tail(starts, 1)]
+
+test_thres <- seq(0.5, 3, by = 0.25)
+```
+
+### Exploring thresholds
+
+```{r}
+img <- Image(new_mat, dim = dim(new_mat))
+thres_stats <- lapply(test_thres, function(thr) {
+  rel <- thr
+  thr <- rel * thres
+  
+  img <- sweep_chroms(
+    img > thr, good_chroms, bins,
+    function(img) {
+      dilate(Image(img), makeBrush(21, "box"))
+    }
+  )
+  
+  labels <- bwlabel(img)
+  tab <- table(labels)
+  data.table(
+    id = as.numeric(names(tab)),
+    n_pixels = as.vector(tab),
+    abs_thres = thr,
+    rel_thres = rel
+  )
+})
+
+thres_stats <- rbindlist(thres_stats)
+thres_stats <- thres_stats[id != 0]
+smmry <- thres_stats[, .(n = max(id), avg_pixels = mean(n_pixels)), by = "rel_thres"]
+
+ggplot(smmry, aes(rel_thres, n)) +
+  geom_point(aes(size = avg_pixels)) +
+  # geom_vline(xintercept = params$threshold, linetype = "dashed") +
+  # geom_hline(yintercept = 27, linetype = "dashed") +
+  scale_y_continuous(
+    trans = "log10"
+  ) +
+  scale_x_continuous(
+    sec.axis = sec_axis(
+      ~ .x * thres, name = "Absolute threshold"
+    )
+  ) +
+  labs(
+    x = "Relative Threshold",
+    y = "Number of identified translocations"
+  )
+```
+
+### Apply chosen threshold
+
+```{r}
+labels <- dilate(img > params$threshold, makeBrush(21, "box"))
+labels <- bwlabel(labels)
+
+ind <- which(labels > 0)
+ind <- arrayInd(ind, dim(labels))
+labels <- labels[ind]
+labels <- data.table(
+  V1 = pmin(ind[, 1], ind[, 2]),
+  V2 = pmax(ind[, 1], ind[, 2]),
+  group = labels
+)
+```
+
+### Translate to pixel
+
+```{r}
+raw <- data[labels, on = c("V1", "V2")]
+raw <- raw[, .SD[which.max(V3)], by = "group"]
+raw <- raw[, c("V1", "V2", "V3"), with = FALSE]
+raw <- raw[V3 > 10 * mean(data$V3) & V3 > 20]
+xmatch <- match(raw$V1, bins$index)
+raw[, chr_x   := bins$V1[xmatch]]
+raw[, start_x := bins$V2[xmatch]]
+raw[, end_x   := bins$V3[xmatch]]
+raw[, bin_x   := bins$V4[xmatch]]
+ymatch <- match(raw$V2, bins$index)
+raw[, chr_y   := bins$V1[ymatch]]
+raw[, start_y := bins$V2[ymatch]]
+raw[, end_y   := bins$V3[ymatch]]
+raw[, bin_y   := bins$V4[ymatch]]
+
+fwrite(
+  raw,
+  file = here::here(
+    "processed_data", "translocations",
+    paste0(donor, "_computed.tsv")
+  ),
+  sep = "\t"
+)
+```
+
+### Display
+
+```{r}
+df <- data[, c("V1", "V2", "V3"), with = FALSE]
+df <- rbind(
+  df,
+  setNames(df, c("V2", "V1", "V3"))[, c("V1", "V2", "V3"), with = FALSE]
+)
+
+ggplot(df, aes(V2, V1, fill = V3)) +
+  geom_raster() +
+  geom_point(
+    data = raw,
+    shape = 1,
+    colour = "dodgerblue",
+    stroke = 1, size = 3
+  ) +
+  scale_fill_cis(
+    name = "Contacts",
+    limits = c(0, 50)
+  ) +
+  scale_y_continuous(
+    trans = "reverse"
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  ggtitle("Raw contacts") +
+  theme_void() +
+  theme(aspect.ratio = 1)
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

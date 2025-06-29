@@ -1,0 +1,441 @@
+---
+title: "Compartment Scores"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(GENOVA)
+library(here)
+library(data.table)
+library(ggplot2)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(RSpectra)
+library(scales)
+library(ppcor)
+
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+files <- list.files(
+  here("data", "hic", "pools"),
+  full.names = TRUE
+)
+names(files) <- tstrsplit(basename(files), "\\.")[[1]]
+
+centros <- readRDS(here("references", "centromeres.rds"))
+centros <- as.data.frame(centros)
+
+exps <- Map(function(file, n) {
+  load_contacts(file, resolution = 100e3, sample_name = n, centromeres = centros)
+}, file = files, n = names(files))
+exps <- sync_indices(exps)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+### Functions
+
+```{r}
+compartment_score2 <- function(explist, ev = 1, bed = NULL, bedgraph = NULL,
+                               ref = 1) {
+  
+  explist <- GENOVA:::check_compat_exp(explist)
+  
+  if (attr(explist[[1]], "resolution") <= 19999) {
+    stop("Too small")
+  }
+  znormed <- vapply(explist, attr, logical(1), "znorm")
+  if (any(znormed)) {
+    stop("No znorms")
+  }
+  
+  expnames <- if (is.null(names(explist))) {
+    vapply(explist, attr, character(1), "samplename")
+  } else {
+    names(explist)
+  }
+  
+  if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
+    blas_threads <- RhpcBLASctl::blas_get_num_procs()
+    on.exit(RhpcBLASctl::blas_set_num_threads(blas_threads))
+    RhpcBLASctl::blas_set_num_threads(1)
+  }
+  
+  idx <- copy(explist[[1]]$IDX)
+  partitioning <- rle(idx$V1)
+  idx <- idx[, if (.N > 4) .SD, by = V1]
+  
+  chrs <- character(max(idx$V4))
+  chrs[idx$V4] <- idx$V1
+  
+  eigs <- lapply(explist, function(exp) {
+    
+    dat <- exp$MAT
+    dat$chr <- chrs[dat$V1]
+    dat <- dat[chr == chrs[dat$V2]]
+    dat <- dat[nzchar(chr)]
+    dat <- dat[, if (sum(!duplicated(V1)) > 2) .SD, by = "chr"]
+    dat[, D := abs(V1 - V2)]
+    dat[, V3 := (V3 / mean(V3) - 1), by = c("chr", "D")]
+    dat[!is.finite(V3), V3 := 0]
+    dat[, uptrimat2eig(V1, V2, V3, ev), by = "chr"]
+    
+  })
+  
+  ans <- rbindlist(eigs, idcol = "sample")
+  ans <- dcast.data.table(ans, bin ~ sample, value.var = "ev")
+  ans <- merge(explist[[1]]$IDX, ans, by.x = "V4", by.y = "bin", all = TRUE)
+  setcolorder(ans, neworder = c(2,3,4,1,5:ncol(ans)))
+  setnames(ans, 1:4, new = c("chrom", "start", "end", "bin"))
+  
+  cols <- vapply(explist, attr, character(1L), "colour")
+  
+  out <- structure(
+    list(compart_scores = as.data.frame(ans)),
+    package = "GENOVA",
+    colours = cols,
+    class = c("CS_discovery", "genomescore_discovery", "discovery"),
+    resolution = attr(explist[[1]], "resolution"),
+    partitioning = partitioning,
+    signed = FALSE
+  )
+  
+  if (!is.null(bedgraph) || !is.null(bed)) {
+    out <- sign_compartmentscore(out, bed = bed, bedgraph = bedgraph)
+  }
+  out
+}
+
+i <- 0
+uptrimat2eig <- function(x, y, value, ev = 1) {
+  i <<- i + 1
+  if (i == 412) {
+    browser()
+  }
+  uniq <- sort(unique(c(x, y)))
+  x <- match(x, uniq)
+  y <- match(y, uniq)
+  
+  mx <- max(x, y, na.rm = TRUE)
+  m <- matrix(0, mx, mx)
+  m[cbind(y, x)] <- pmin(value, quantile(value, 0.995))
+  # last_mx <<- m
+  eig <- RSpectra::eigs_sym(A = m, k = ev, which = "LA")
+  eig <- eig$vectors[, ev] * sqrt(abs(eig$values[ev]))
+  data.table(bin = uniq[seq_along(eig)], ev = eig)
+}
+```
+
+
+## Aim
+
+### Calculate compartment scores
+
+#### GC frequency
+
+```{r}
+idx <- orig <- exps[[1]]$IDX
+idx <- idx[, GRanges(V1, IRanges(V2 + 1, V3))]
+idx <- idx[seqnames(idx) %in% paste0("chr", c(1:22, c("X", "Y", "M")))]
+idx <- BSgenomeViews(BSgenome.Hsapiens.UCSC.hg38, idx)
+gc_freq <- letterFrequency(idx, "GC", as.prob = TRUE)[, 1]
+gc_freq <- cbind(as.data.frame(idx@granges), gc = gc_freq)
+gc_freq$width <- gc_freq$strand <- NULL
+```
+
+```{r}
+idx <- exps[[1]]$IDX
+part <- GENOVA:::partition_chromosomes(idx, exps[[1]]$CENTROMERES)
+idx$V1 <- inverse.rle(part)
+
+exps <- lapply(exps, function(exp) {
+  exp$IDX <- idx
+  exp$MAT <- exp$MAT[V3 > 0]
+  exp
+})
+```
+
+
+```{r}
+cs <- compartment_score2(exps)
+
+# gc <- gc_freq
+# gc$seqnames <- inverse.rle(part)
+# 
+# signed <- sign_compartmentscore(cs, bedgraph = gc)
+```
+
+#### Fix signs
+
+```{r}
+score <- as.data.table(copy(cs$compart_scores))
+score$gc <- gc_freq$gc
+
+for (i in expnames(exps)) {
+  score$tmp <- score[[i]]
+  correls   <- score[, cor(gc, tmp, use = "pairwise.complete.obs",
+                           method = "spearman"), by = "chrom"]
+  flip <- setNames(!is.na(correls$V1) & correls$V1 < 0, correls$chrom)
+  score[flip[chrom], tmp := tmp * -1]
+  score[[i]] <- score$tmp
+}
+score$tmp <- score$gc <- NULL
+
+signed <- copy(cs)
+signed$compart_scores <- score
+```
+
+
+
+
+```{r}
+mean_cor <- function(x) {
+  cor <- cor(as.matrix(x), use = "pairwise.complete.obs", method = "spearman")[-c(1:3), -c(1:3)]
+  list(
+    nm  = rownames(cor),
+    med = matrixStats::rowMeans2(cor)
+  )
+}
+
+cors <- as.data.table(signed$compart_scores)
+cors <- cors[, mean_cor(.SD), by = "chrom"]
+
+ggplot(cors, aes(nm, chrom, fill = med)) +
+  geom_raster() +
+  scale_fill_GENOVA_div(midpoint = 0) +
+  guides(x = guide_axis(angle = 90))
+```
+
+```{r}
+scores <- as.data.frame(signed$compart_scores)
+
+do_flip <- cors[med < 0]
+
+for (i in seq_len(nrow(do_flip))) {
+  chrom  <- do_flip$chrom[i]
+  sample <- do_flip$nm[i]
+  rows <- scores$chrom == chrom
+  scores[rows, sample] <- scores[rows, sample] * -1
+}
+scores <- as.data.table(scores)
+signed$compart_scores <- scores
+attr(signed, "signed") <- TRUE
+
+cors <- scores[, mean_cor(.SD), by = "chrom"]
+
+ggplot(cors, aes(nm, chrom, fill = med)) +
+  geom_raster() +
+  scale_fill_GENOVA_div(midpoint = 0) +
+  guides(x = guide_axis(angle = 90))
+```
+
+### PCA
+
+```{r}
+scores <- signed$compart_scores
+scores <- as.matrix(scores[, -c(1:4)])
+scores[is.na(scores)] <- 0
+scores <- scores[rowSums(scores) != 0,]
+pca <- prcomp(scale(t(scores)))
+varexp <- pca$sdev^2/sum(pca$sdev^2)
+
+df <- data.frame(
+  pc1 = pca$x[, 1],
+  pc2 = pca$x[, 2],
+  nm  = colnames(scores),
+  pat = tstrsplit(colnames(scores), "_")[[1]],
+  type = tstrsplit(colnames(scores), "_")[[2]]
+)
+
+ggplot(df, aes(pc1, pc2, label = pat, colour = type)) +
+  geom_text() +
+  coord_equal(clip = "off") +
+  labs(
+    x = paste0("PC1 ", scales::percent(varexp[1])),
+    y = paste0("PC2 ", scales::percent(varexp[2]))
+  ) +
+  theme(
+    aspect.ratio = NULL
+  )
+```
+
+### Compartment strength
+
+#### Plain
+
+```{r}
+saddles <- saddle(exps, signed, bins = 50)
+
+
+df <- copy(saddles$saddle)
+df <- df[, mean(mean), by = c("exp", "q1", "q2")]
+
+ggplot(df, aes(q1, q2, fill = V1)) +
+  geom_raster() +
+  geom_raster(aes(q2, q1)) +
+  scale_fill_GENOVA_div(midpoint = 1, name = "Obs/Exp") +
+  facet_wrap(~ exp, ncol = 6) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0))
+```
+
+
+```{r}
+cstrength <- quantify(saddles)
+
+udata <- cstrength[!duplicated(cbind(exp, chr))]
+udata <- udata[!chr %in% c("chrM", "chrY")]
+udata[, pat := tstrsplit(exp, "_")[[1]]]
+udata[, type := tstrsplit(exp, "_")[[2]]]
+
+ggplot(udata, aes(strength, exp, fill = type)) +
+  geom_boxplot(outlier.shape = 21)
+```
+
+#### Norm. by chromosome
+
+```{r}
+udata[, zscore := scale(strength), by = "chr"]
+
+ggplot(udata, aes(zscore, exp, fill = type)) +
+  geom_boxplot(outlier.shape = 21)
+```
+
+### Compare samples
+
+```{r}
+m <- signed$compart_scores
+m <- as.matrix(m[, 5:ncol(m)])
+m <- sign(m)
+m <- as.data.frame(m)
+
+
+grid <- expand.grid(colnames(m), colnames(m))
+grid$value <- vapply(seq_len(nrow(grid)), function(i) {
+  
+  x <- m[[grid$Var1[i]]]
+  y <- m[[grid$Var2[i]]]
+  
+  keep <- !is.na(x) & !is.na(y)
+  mean(x[keep] == 1 & y[keep] == -1)
+}, numeric(1))
+
+ggplot(grid, aes(Var1, Var2, fill = value)) +
+  geom_raster() +
+  scale_fill_viridis_c() +
+  labs(x = "A compartment in:", y = "B compartment in:") +
+  guides(x = guide_axis(angle = 90))
+```
+
+```{r}
+rs <- rowSums(as.matrix(m))
+tab <- table(rs)
+tab <- as.data.frame(tab)
+tab$rs <- as.numeric(as.character(tab$rs))
+tab$frac <- (tab$Freq) / sum(tab$Freq)
+tab$score <- tab$rs / ncol(m)
+
+ggplot(tab, aes(score, frac, fill=score)) +
+  geom_col() +
+  scale_fill_GENOVA_div(guide = "none")
+```
+
+```{r}
+signed$compart_scores$chrom <- orig$V1
+saveRDS(signed, here("rds", "01_compartment_scores.rds"))
+saveRDS(saddles, here("rds", "01_saddle.rds"))
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

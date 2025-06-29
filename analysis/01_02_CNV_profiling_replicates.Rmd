@@ -1,0 +1,712 @@
+---
+title: "CNV profiling"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(here)
+library(GenomicRanges)
+library(data.table, exclude = "shift")
+library(rtracklayer)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggplot2)
+library(DNAcopy)
+```
+
+### Load data
+
+```{r load_data}
+project <- yaml::read_yaml(here("data", "hic", "project.yml"))
+
+hg38 <- SeqinfoForUCSCGenome("hg38")
+hg38 <- keepStandardChromosomes(hg38, "Homo_sapiens")
+hg38 <- dropSeqlevels(hg38, c("chrY", "chrM"))
+
+resolutions <- as.vector(outer(c(1, 2, 5), c(1e4, 1e5, 1e6)))
+
+bins <- lapply(resolutions, function(res) {
+  tileGenome(hg38, tilewidth = res, cut.last.tile.in.chrom = TRUE)
+})
+bins <- stack(as(bins, "GRangesList"))
+bins$resolution <- resolutions[as.integer(bins$name)]
+bins <- as(bins, "GNCList")
+
+pair_files <- list.files(
+  here("data", "hic", "pairs"),
+  full.names = TRUE, pattern = "\\.nodups\\."
+)
+names(pair_files) <- tstrsplit(basename(pair_files), "\\.")[[1]]
+
+digest <- "/DATA/references/human/hg38/Homo_sapiens/UCSC/hg38/Sequence/Bowtie2Index/genome_MBO1.bed"
+
+genome <- BSgenome.Hsapiens.UCSC.hg38
+
+mappa_bw <- here("references", "k100.Umap.MultiTrackMappability.bw")
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+## Aim
+
+Doing cancer specific HiC requires some additional normalisation effort in order to deal with translocations and copy number alterations. Here, we segment the genomes into various copy numbers.
+
+## Bin covariates
+
+### Restriction sites
+
+We want to include the number of restriction sites per bin as a covariate.
+
+```{r}
+digest <- fread(digest)
+digest <- digest[, GRanges(V1, IRanges(V2, V3))]
+
+bins$digest <- countOverlaps(bins, digest)
+rm(digest)
+```
+
+### GC content
+
+```{r}
+gc_freq <- BSgenomeViews(genome, bins)
+gc_freq <- letterFrequency(gc_freq, "GC", as.prob = TRUE)
+
+bins$gc_freq <- gc_freq[, 1]
+
+rm(gc_freq)
+```
+
+### Mappability
+
+```{r}
+mappa_bw <- BigWigFile(mappa_bw)
+
+mappa <- suppressWarnings(summary(
+  mappa_bw, which = bins,
+  size = 1, type = "mean", defaultValue = NA,
+  as = "matrix"
+))
+
+bins$mappability <- mappa[, 1]
+rm(mappa)
+```
+
+## Count
+
+Counting functions.
+
+```{r}
+file_as_counts <- function(file, bins) {
+  suppressWarnings({
+    file  <- fread(file, skip = "#columns:")
+  })
+  mate  <- file[, GPos(V2, V3)]
+  mate  <- keepSeqlevels(mate, seqlevels(bins), pruning.mode = "coarse")
+  first <- countOverlaps(bins, mate)
+  mate  <- file[, GPos(V4, V5)]
+  mate  <- keepSeqlevels(mate, seqlevels(bins), pruning.mode = "coarse")
+  second <- countOverlaps(bins, mate)
+  first + second
+}
+```
+
+Counting
+
+```{r}
+# Count reads in pair files
+counts <- lapply(pair_files, file_as_counts, bins = bins)
+counts <- do.call(cbind, counts)
+
+# Aggregate replicates
+colnames(counts) <- gsub(".hg38.nodups.pairs.gz", "", basename(pair_files))
+
+# samples <- split(colnames(counts), gsub("_rep.$", "", colnames(counts)))
+# 
+# counts <- vapply(samples, function(i) {
+#   if (length(i) == 1) {
+#     return(counts[, i])
+#   }
+#   return(rowSums(counts[, i]))
+# }, numeric(nrow(counts)))
+
+```
+
+### Example
+
+An example of raw counts of the first sample.
+
+```{r}
+keep <- bins$resolution == 2e5
+seqlengths <- data.table(chr = decode(seqnames(bins)), end = end(bins))
+seqlengths <- seqlengths[, .(len = max(end)), by = "chr"]
+seqlengths <- seqlengths[, setNames(len, chr)]
+
+offset <- setNames(c(0, cumsum(as.numeric(seqlengths))), 
+                   c(names(seqlengths), "end"))
+
+df <- data.frame(
+  chr   = decode(seqnames(bins)[keep]),
+  mid   = mid(bins[keep]) + offset[decode(seqnames(bins)[keep])],
+  count = counts[keep, 1]
+)
+df$chr_col <- as.numeric(df$chr) %% 2
+
+ggplot(df, aes(mid, count + 1, colour = factor(chr_col))) +
+  geom_point(size = 0) +
+  scale_colour_manual(
+    values = c("black", "grey50"),
+    guide  = "none"
+  ) +
+  scale_y_continuous(
+    trans = "log10", limits = c(1e3, 1e5),
+                     oob = scales::oob_squish,
+    labels = scales::label_log()) +
+  scale_x_continuous(
+    breaks = (offset[-length(offset)] + offset[-1]) / 2,
+    expand = c(0, 0),
+    guide = guide_axis(n.dodge = 2)
+  ) +
+  theme(aspect.ratio = 0.3)
+```
+
+### Mean-variance trend
+
+If mean-variance trend follows the mean = variance relationship (red dotted line), the data would be Poisson-distributed. If it is above the red dotted line, the data is 'overdispersed'.
+
+```{r}
+res_lvls <- as.character(unique(bins$resolution))
+
+df <- data.frame(
+  mean = rowMeans(counts),
+  var  = matrixStats::rowVars(counts),
+  res  = factor(bins$resolution, res_lvls, gsub("000$", "k", res_lvls))
+)
+
+ggplot(df, aes(mean + 1, sqrt(var))) +
+  geom_point(pch = ".") +
+  geom_abline(
+    slope = 1, intercept = 0,
+    colour = "red", linetype = "dotted"
+  ) +
+  scale_x_continuous(
+    trans = "log10",
+    name  = "Mean Counts + 1"
+  ) +
+  scale_y_continuous(
+    trans = "log10",
+    name  = "Variance + 1"
+  ) +
+  facet_wrap(~ res) +
+  coord_equal() +
+  theme(
+    aspect.ratio = NULL
+  )
+```
+
+### Normalisation
+
+We normalise the data by accounting for (1) the number of restriction sites per bin, (2) the GC-content per bin and (3) mappability. Because the relations of counts to these covariates is murky, we allow a flexible 3rd order polynomial for these covariates in a negative-binomial GLM. The normalised data are the residuals + the predicted value for fixed covariates. In the fixed covariates, we set mappability = 1 and the others to their medians. We then use a log2 ratio over the median.
+
+```{r}
+normalise_counts <- function(counts, bins) {
+  tmp <- data.frame(
+    count = counts,
+    mappa = bins$mappability,
+    gc    = bins$gc_freq,
+    dig   = bins$digest,
+    id    = seq_along(bins)
+  )
+  tmp <- subset(tmp, !is.na(mappa) & !is.na(gc) & count > 0)
+  
+  fit <- locfit::locfit(
+    count ~ mappa + gc + dig,
+    family = "poisson", data = tmp
+  )
+  
+  # fit <- glm(
+  #   count ~ poly(mappa, 3) + poly(gc, 3) + poly(dig, 3),
+  #   family = "poisson", data = tmp
+  # )
+  
+  # fit <- MASS::glm.nb(
+  #   count ~ poly(mappa, 3) + poly(gc, 3) + poly(dig, 3),
+  #   data = tmp
+  # )
+  
+  ans <- rep(NA_real_, length(counts))
+  ans[tmp$id] <- 
+    resid(fit, type = "response", data = tmp) +
+    predict(
+      fit, type = "response",
+      newdata = transform(
+        tmp, 
+        mappa = 1, gc = median(gc), dig = median(dig)
+      )
+    )
+  ans <- pmax(ans, 0)
+  log2(ans / median(ans[is.finite(ans)], na.rm = TRUE))
+}
+```
+
+```{r, warning=FALSE}
+grid <- expand.grid(
+  sample = colnames(counts),
+  res    = unique(bins$resolution),
+  stringsAsFactors = FALSE
+)
+
+normed <- Map(
+  function(sample, resolution) {
+    print(paste0(sample, "_", resolution))
+    idx <- which(bins$resolution == resolution)
+    normalise_counts(counts[idx, sample], bins[idx])
+  },
+  sample     = grid$sample,
+  resolution = grid$res
+)
+
+normed <- matrix(normed, nrow = ncol(counts), ncol = length(unique(grid$res)))
+dimnames(normed) <- list(unique(grid$sample), unique(grid$res))
+normed <- apply(normed, 1, unlist, use.names = TRUE)
+
+subbins <- bins[bins$resolution %in% grid$res]
+subbins <- subbins[order(factor(subbins$resolution, res_lvls))]
+```
+
+### Normalised example
+
+```{r}
+keep <- subbins$resolution == 200000
+df <- data.frame(
+  chr   = decode(seqnames(subbins)[keep]),
+  mid   = mid(subbins[keep]) + offset[decode(seqnames(subbins)[keep])],
+  count = normed[subbins$resolution == 200000, 1]
+)
+df <- df[!is.na(df$count), ]
+df$chr_col <- as.numeric(df$chr) %% 2
+
+ggplot(df, aes(mid, count, colour = factor(chr_col))) +
+  geom_point(size = 0) +
+  scale_colour_manual(
+    values = c("black", "grey50"),
+    guide  = "none"
+  ) +
+  scale_y_continuous(
+    oob = scales::oob_squish,
+    limits = c(-3, 3)
+  ) +
+  scale_x_continuous(
+    breaks = (offset[-length(offset)] + offset[-1]) / 2,
+    expand = c(0, 0),
+    guide = guide_axis(n.dodge = 2)
+  ) +
+  theme(aspect.ratio = 0.3)
+```
+
+## CNV detection
+
+```{r}
+cnvs <- lapply(setNames(nm = unique(subbins$resolution)), function(res) {
+  keep <- subbins$resolution == res
+  cna <- CNA(
+    genomdat  = normed[keep, ],
+    chrom     = decode(seqnames(subbins)[keep]),
+    maploc    = mid(subbins)[keep],
+    sampleid  = colnames(normed),
+    data.type = "logratio"
+  )
+  cna <- smooth.CNA(cna, outlier.SD.scale = 1, trim = 0.05, smooth.region = 20)
+  segment(cna, undo.splits = "sdundo", 
+          # undo.SD = if (res == "20000") 2 else 3, 
+          verbose = FALSE)
+})
+```
+
+### Example
+
+```{r}
+segm <- cnvs$`2e+05`
+
+df <- data.frame(
+  chr = segm$data$chrom,
+  mid = segm$data$maploc + offset[segm$data$chrom],
+  val = segm$data$P01_PE,
+  chr_col = as.numeric(factor(segm$data$chrom, names(offset))) %% 2
+)
+
+segdf <- data.frame(
+  chr    = segm$output$chrom,
+  start  = segm$output$loc.start + offset[segm$output$chrom],
+  end    = segm$output$loc.end + offset[segm$output$chrom],
+  sample = segm$output$ID,
+  val    = segm$output$seg.mean
+)
+segdf$id <- match(segdf$sample, colnames(normed))
+
+ggplot(df, aes(mid, val, colour = factor(chr_col))) +
+  geom_point(size = 0) +
+  geom_segment(
+    data = subset(segdf, sample == colnames(normed)[[1]]),
+    aes(x = start, xend = end, y = val, yend = val),
+    colour = "red"
+  ) +
+  scale_colour_manual(
+    values = c("black", "grey50"),
+    guide  = "none"
+  ) +
+  scale_y_continuous(
+    oob = scales::oob_squish,
+    limits = c(-3, 3),
+    breaks = -3:3
+  ) +
+  scale_x_continuous(
+    breaks = (offset[-length(offset)] + offset[-1]) / 2,
+    expand = c(0, 0),
+    guide = guide_axis(n.dodge = 2)
+  ) +
+  theme(aspect.ratio = 0.3)
+```
+
+### Overview
+
+```{r}
+segdf <- data.frame(
+  chr    = segm$output$chrom,
+  start  = segm$output$loc.start,
+  end    = segm$output$loc.end,
+  sample = segm$output$ID,
+  val    = segm$output$seg.mean
+)
+segdf$id <- match(segdf$sample, colnames(normed))
+segdf$chr <- factor(segdf$chr, seqlevels(bins))
+segdf$chr_display <- segdf$chr
+levels(segdf$chr_display) <- c(
+  levels(segdf$chr_display)[1], 
+  gsub("^chr", "", levels(segdf$chr_display)[-1])
+)
+
+p <- ggplot(segdf, aes(fill = val)) +
+  geom_rect(
+    aes(xmin = start, xmax = end,
+        ymin = id - 0.5, ymax = id + 0.5)
+  ) +
+  geom_hline(
+    yintercept = seq_len(ncol(normed)) + 0.5, linewidth = 0.25
+  ) +
+  scale_x_continuous(
+    breaks = ~ sum(.x)/2,
+    labels = NULL,
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    breaks = seq_along(colnames(normed)),
+    labels = colnames(normed)
+  ) +
+  scale_fill_gradientn(
+    colours = c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", 
+                "#fcb09d", "#ed6855", "#be2a21"),
+    limits = c(-2, 2), oob = scales::oob_squish,
+    labels = scales::number_format(style_positive = "plus", 
+                                   style_negative = "minus"),
+    name = "Relative\nCopynumber"
+  ) +
+  facet_grid(~ chr_display, scales = "free_x", space = "free_x", switch = "x") +
+  theme(
+    aspect.ratio = NULL,
+    panel.spacing.x = unit(0, "pt"),
+    strip.placement = "outside",
+    panel.border = element_rect(fill = NA, colour = "black",
+                                size = 0.25)
+  )
+p
+```
+
+### Profile
+
+```{r}
+seggr <- with(segdf, GRanges(chr, IRanges(ifelse(is.na(start), 1, start + 1), end), val = val))
+
+loss <- coverage(seggr, weight = ifelse(is.na(seggr$val), 0, 
+                                        as.numeric(seggr$val < -0.3)))
+gain <- coverage(seggr, weight = ifelse(is.na(seggr$val), 0, 
+                                        as.numeric(seggr$val >  0.3)))
+
+loss <- as(loss, "GRanges")
+gain <- as(gain, "GRanges")
+
+prof <- data.table(
+  chr = decode(c(seqnames(loss), seqnames(gain))),
+  start = c(start(loss), start(gain)),
+  end   = c(end(loss), end(gain)),
+  val   = c(score(loss), score(gain)),
+  type  = rep.int(c("Loss", "Gain"), c(length(loss), length(gain)))
+)
+prof <- melt(prof, measure.vars = c("start", "end"), value.name = "pos")
+prof$opos <- prof$pos + offset[prof$chr]
+prof$chr_display <- prof$chr
+levels(prof$chr_display) <- c(
+  levels(prof$chr_display)[1], 
+  gsub("^chr", "", levels(prof$chr_display)[-1])
+)
+
+ggplot(prof, aes(opos, val, fill = type)) +
+  geom_area(alpha = 0.5, position = "identity") +
+  scale_x_continuous(
+    breaks = ~ sum(.x)/2,
+    labels = NULL,
+    expand = c(0, 0),
+    name = NULL
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    breaks = 0:11,
+    name = "# Samples"
+  ) +
+  scale_fill_manual(
+    values = CYRUP[2:3],
+    name = "Copy Number"
+  ) +
+  facet_grid(~ chr_display, scales = "free_x", space = "free_x", switch = "x") +
+  theme(
+    aspect.ratio = NULL,
+    panel.spacing.x = unit(0, "pt"),
+    strip.placement = "outside",
+    panel.border = element_rect(fill = NA, colour = "black",
+                                size = 0.25)
+  )
+```
+
+## Reformat
+
+```{r}
+reformat <- function(cnv, bin) {
+  cnv <- with(
+    cnv$output, GRanges(
+      chrom, IRanges(ifelse(is.na(loc.start), 1, loc.start + 1), loc.end), 
+      seg = seg.mean, id = ID)
+  )
+  mini <- resize(bin, 1, fix = "center")
+  samples <- colnames(normed)
+  new <- lapply(setNames(nm = samples), function(pat) {
+    pat_cnv <- cnv[cnv$id == pat]
+    pat_cnv <- pat_cnv[!is.na(pat_cnv$seg)]
+    near <- nearest(mini, pat_cnv)
+    ans  <- pat_cnv$seg[near] 
+    ifelse(is.na(ans), 1, ans)
+  })
+  new <- do.call(cbind, new)
+    
+  cbind(
+    data.frame(
+      chrom = decode(seqnames(bin)),
+      start = start(bin) - 1L,
+      end   = end(bin),
+      bin   = seq_along(bin)
+    ),
+    new
+  )
+}
+
+gr_bins <- as(bins, "GRanges")
+rfmt <- lapply(setNames(nm = unique(bins$resolution)), function(res) {
+  reformat(cnvs[[as.character(res)]], gr_bins[bins$resolution == res])
+})
+```
+
+## Loose ends
+
+```{r}
+cnts <- as.data.frame(counts[bins$resolution == 100000, ])
+cor <- cor(cnts)
+
+cor_df <- reshape2::melt(cor)
+
+ggplot(cor_df, aes(Var1, Var2, fill = value)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    colors = c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", 
+               "#fcb09d", "#ed6855", "#be2a21"),
+    name = "Pearson's R"
+  ) +
+  labs(x = NULL, y = NULL)
+```
+
+
+Typical correlation of sample pair.
+
+```{r}
+ggplot(cnts, aes(P07_PE + 1, P04_PE + 1)) +
+  geom_point(size = 0) +
+  scale_x_continuous(
+    trans  = "log10",
+    labels = scales::label_log(),
+    breaks = 10^(0:6)
+  ) +
+  scale_y_continuous(
+    trans  = "log10",
+    labels = scales::label_log(),
+    breaks = 10^(0:6)
+  ) +
+  annotate(
+    "text", label = paste0("R = ", scales::number(cor["P04_PE", "P07_PE"], accuracy = 0.001)),
+    x = 0, y = Inf, hjust = -0.5, vjust = 2
+  )
+```
+
+
+Suspicious correlation between sample pairs:
+
+```{r}
+ggplot(cnts, aes(P05_PE + 1, P10_PE + 1)) +
+  geom_point(size = 0) +
+  scale_x_continuous(
+    trans = "log10",
+    labels = scales::label_log(),
+    breaks = 10^(0:6)
+  ) +
+  scale_y_continuous(
+    trans = "log10",
+    labels = scales::label_log(),
+    breaks = 10^(0:6)
+  ) +
+  annotate(
+    "text", label = paste0("R = ", scales::number(cor["P05_PE", "P10_PE"], accuracy = 0.001)),
+    x = 0, y = Inf, hjust = -0.5, vjust = 2
+  )
+```
+
+
+Another suspicious correlation:
+
+```{r}
+ggplot(cnts, aes(P06_PE_rep1 + 1, P08_PE + 1)) +
+  geom_point(size = 0) +
+  scale_x_continuous(
+    trans = "log10",
+    labels = scales::label_log(),
+    breaks = 10^(0:6)
+  ) +
+  scale_y_continuous(
+    trans = "log10",
+    labels = scales::label_log(),
+    breaks = 10^(0:6)
+  ) +
+  annotate(
+    "text", label = paste0("R = ", scales::number(cor["P06_PE_rep1", "P08_PE"], accuracy = 0.001)),
+    x = 0, y = Inf, hjust = -0.5, vjust = 2
+  )
+```
+
+
+## Save output
+
+```{r}
+resolutions <- lapply(cnvs, function(cnv) {
+  as.data.frame(cnv$data)
+})
+resolutions <- rbindlist(resolutions, idcol = "resolution")
+setDF(resolutions)
+saveRDS(
+  resolutions,
+  here::here("rds", "cnv_data.rds")
+)
+```
+
+
+```{r, eval = FALSE}
+for (i in names(rfmt)) {
+  file <- here("processed_data", "cnvs", paste0("res_", i, ".tsv"))
+  fwrite(
+    rfmt[[i]], file = file, sep = "\t"
+  )
+}
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

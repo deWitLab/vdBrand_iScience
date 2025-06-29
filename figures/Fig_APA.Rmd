@@ -1,0 +1,201 @@
+---
+title: "APA"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(here)
+library(GENOVA)
+library(ggplot2)
+library(data.table)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+loops <- here("data", "loops_merged_HB_PB_LM_10kb_pearson_0.4.bedpe")
+loops <- as.data.frame(fread(loops))
+
+aapas <- here("rds", "03_APAs_abs.rds")
+apas  <- NULL
+if (file.exists(aapas)) {
+  apas <- readRDS(aapas)
+}
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+# mycolour <- "#000000FF" # Opaque Black
+# 
+# theme_set(theme_gray())
+# theme_update(text = element_text(colour = mycolour),
+#              line = element_line(colour = mycolour),
+#              aspect.ratio = 1,
+#              axis.line  = element_line(colour = mycolour),
+#              axis.ticks = element_line(colour = mycolour),
+#              axis.text  = element_text(colour = mycolour),
+#              legend.key = element_blank(),
+#              legend.background = element_rect(colour = NA, fill = NA),
+#              panel.background = element_blank(),
+#              panel.grid.major = element_line(colour = "grey95"),
+#              panel.grid.minor = element_blank(),
+#              plot.background  = element_blank(),
+#              strip.background = element_blank(),
+#              strip.text = element_text(colour = mycolour))
+# CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+# rm(mycolour)
+```
+
+## Aim
+
+```{r}
+coolers <- coolers[!grepl("_PE$", names(coolers))]
+coolers <- coolers[setdiff(names(coolers), c("P01_??", "P02_BR"))]
+```
+
+```{r, eval=is.null(apas)}
+apas <- lapply(setNames(nm = names(coolers)), function(i) {
+  exp <- GENOVA::load_contacts(coolers[i], sample_name = i, resolution = 10e3, z_norm = FALSE)
+  APA(exp, loops)
+})
+apas <- do.call(bundle, apas)
+```
+
+
+```{r}
+set_figure_theme()
+df <- reshape::melt(apas$signal)
+
+df$pat <- tstrsplit(df$X3, "_")[[1]]
+df$type <- factor(tstrsplit(df$X3, "_")[[2]], c("HB", "PB", "LM"))
+
+p <- ggplot(df, aes(X1, X2, fill = value)) +
+  geom_raster() +
+  GENOVA::scale_fill_GENOVA(
+    limits = c(0, NA), name = "Contacts",
+    guide = guide_colourbar(
+      barwidth = unit(5.5, "pt"),
+      barheight = unit(1.5 * 5, "cm") + unit(5.5 * 4, "pt")
+    )
+  ) +
+  facet_grid(pat ~ type, switch = "y", scales = "free") +
+  scale_x_continuous(
+    breaks = c(-1, 0, 1) * 1e5,
+    expand = c(0, 0),
+    labels = scales::label_number(scale = 1e-3, suffix = "\nkb"),
+    name = NULL
+  ) +
+  ggh4x::facetted_pos_scales(
+    y = c(list(
+      scale_y_continuous(
+        breaks = c(-1, 0, 1) * 1e5,
+        expand = c(0, 0),
+        labels = scales::label_number(scale = 1e-3, suffix = "\nkb"),
+        name = NULL
+      )),
+      rep(list(scale_y_continuous(
+        breaks = c(-1, 0, 1) * 1e5,
+        expand = c(0, 0),
+        labels = NULL,
+        name = NULL
+      )), 4)
+    ),
+    x = c(list(
+      scale_x_continuous(
+        breaks = c(-1, 0, 1) * 1e5,
+        expand = c(0, 0),
+        labels = scales::label_number(scale = 1e-3, suffix = "\nkb"),
+        name = NULL
+      )),
+      rep(list(scale_x_continuous(
+        breaks = c(-1, 0, 1) * 1e5,
+        expand = c(0, 0),
+        labels = NULL,
+        name = NULL
+      )), 2)
+    )
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(1.5, "cm"),
+    cols = unit(1.5, "cm")
+  ) +
+  theme(legend.box.spacing = unit(0, "cm"))
+
+save_svg("Fig_APA_absolute", p)
+```
+
+
+```{r}
+saveRDS(apas, here("rds", "03_APAs_abs.rds"))
+# saveRDS(apas, zapas)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+# pkgs <- loadedNamespaces()
+# libTvdB::format_sessioninfo_html(pkgs)
+```
