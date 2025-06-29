@@ -1,0 +1,415 @@
+---
+title: "Untitled"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GenomicRanges)
+library(patchwork)
+library(Matrix)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+tads <- readRDS(here("rds", "01_TADs.rds"))
+tads$exp <- sample_lut[tads$exp]
+tads <- tads[grepl("_PE$", tads$exp),,]
+
+cistrome_dir <- "/DATA/users/moreno/references/cistrome_human"
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+## Aim
+
+```{r}
+borders <- GRanges(
+  seqnames = c(tads$chrom, tads$chrom),
+  IRanges(c(tads$start, tads$end), width = 1),
+  exp = c(tads$exp, tads$exp)
+)
+
+wide_borders <- resize(borders, 3 * 20e3, fix = "center")
+wide_borders <- reduce(wide_borders)
+wide_borders <- wide_borders[width(wide_borders) <= 1e5]
+
+binary <- vapply(
+  split(borders, borders$exp),
+  function(gr) {
+    overlapsAny(wide_borders, gr)
+  },
+  logical(length(wide_borders))
+)
+rownames(binary) <- paste0("TAD_", seq_len(nrow(binary)))
+wide_borders$freq <- rowSums(binary)
+```
+
+```{r}
+tab <- table(wide_borders$freq)
+print(sum(tab))
+plot(tab)
+```
+
+### Metadata import
+
+
+```{r}
+cistrome <- list.files(cistrome_dir, full.names = TRUE, pattern = "QC.txt")
+cistrome <- setNames(lapply(cistrome, fread), c("Factor", "Histones"))
+cistrome <- rbindlist(cistrome, idcol = "Data_type")
+```
+
+### Inclusion criteria
+
+```{r}
+cell_line <- c("MCF7", "MCF-10A", "MDA-MB-231", "T47D", "T47D-MTVL")
+cell_type <- c(
+  "Epithelium", "Mammary carcinoma cell", "Human Breast Cancer Cell"
+)
+tissue    <- c("Breast", "Mammary Gland")
+
+cistrome[, keep := FALSE]
+cistrome[Cell_type %in% cell_type, keep := TRUE]
+cistrome[Cell_line %in% cell_line, keep := TRUE]
+cistrome[Tissue_type %in% tissue,  keep := TRUE]
+
+meta <- cistrome[keep == TRUE]
+```
+
+### Exclusion criteria
+
+```{r}
+# Anything that is not
+tissue <- c("Breast", "None", "Mammary Gland")
+meta <- meta[Tissue_type %in% tissue]
+
+# For each cell_line/factor combination pick dataset with most strong peaks
+meta <- meta[, .SD[which.max(PeaksFoldChangeAbove10)], 
+             by = c("Cell_line", "Factor")]
+```
+
+### Overview
+
+#### Tissue type
+
+```{r}
+phi   <- 2/(1 + sqrt(5))
+width <- phi / 2
+pos   <- position_dodge(phi, preserve = "single")
+fmt   <- function(x, n = 10) {
+  forcats::fct_rev(forcats::fct_lump(forcats::fct_infreq(x), n))
+}
+
+ggplot(meta, aes(y = fmt(Tissue_type), fill = Data_type)) +
+  geom_bar(width = width, position = pos) +
+  scale_x_continuous(expand = c(0, 0, 0.1, 0)) +
+  labs(
+    x = "# Datasets",
+    y = "Tissue type",
+    fill = "Dataset type"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank()
+  )
+```
+
+#### Cell type
+
+```{r}
+ggplot(meta, aes(y = fmt(Cell_type), fill = Data_type)) +
+  geom_bar(width = width, position = pos) +
+  scale_x_continuous(expand = c(0, 0, 0.1, 0)) +
+  labs(
+    x = "# Datasets",
+    y = "Cell type"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank()
+  )
+```
+
+#### Cell line
+
+```{r}
+ggplot(meta, aes(y = fmt(Cell_line), fill = Data_type)) +
+  geom_bar(width = width, position = pos) +
+  scale_x_continuous(expand = c(0, 0, 0.1, 0)) +
+  labs(
+    x = "# Datasets",
+    y = "Cell line"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank()
+  )
+```
+
+#### Factors 
+
+```{r}
+ggplot(meta, aes(y = fmt(Factor), fill = Data_type)) +
+  geom_bar(width = width, position = pos) +
+  scale_x_continuous(expand = c(0, 0, 0.1, 0)) +
+  labs(
+    x = "# Datasets",
+    y = "Cell type"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank()
+  )
+```
+
+## Import Cistrome
+
+### Match files
+
+```{r}
+cistrome_files <- list.files(
+  cistrome_dir, recursive = TRUE, full.names = TRUE
+)
+dcid <- basename(cistrome_files)
+dcid <- tstrsplit(dcid, "_", keep = 1)[[1]]
+meta_match <- match(as.character(meta$DCid), dcid)
+meta$file <- cistrome_files[meta_match[!is.na(meta_match)]]
+
+# Kick out empty files
+meta <- meta[fs::file_size(file) > 100]
+meta[, keep := NULL]
+```
+
+```{r}
+cistrome_data <- lapply(
+  setNames(meta$file, meta$DCid),
+  fread, sep = "\t", header = FALSE
+)
+cistrome_data <- rbindlist(cistrome_data, idcol = "dcid", fill = TRUE)
+```
+
+### Kick out small datasets
+
+```{r}
+good_chroms <- paste0("chr", c(1:22, "X"))
+cistrome_data <- cistrome_data[V1 %in% good_chroms, ]
+
+npeaks <- cistrome_data[, .(n = .N), by = "dcid"]
+keep <- npeaks[n >= 1000, dcid]
+
+meta <- meta[DCid %in% keep]
+cistrome_data <- cistrome_data[dcid %in% keep]
+cistrome_data <- cistrome_data[, 
+  GRanges(V1, IRanges(V2 + 1, V3), DCid = dcid, seqinfo = seqinfo(wide_borders))
+]
+cistrome_data <- sort(cistrome_data)
+```
+
+### Count at TAD borders
+
+```{r}
+overlaps <- findOverlaps(cistrome_data, wide_borders)
+overlaps <- data.table(
+  peak   = from(overlaps),
+  border = to(overlaps)
+)
+overlaps[, dataset := cistrome_data$DCid[peak]]
+overlaps <- overlaps[, .N, by = c("dataset", "border")]
+overlaps[, id := match(dataset, meta$DCid)]
+
+counts <- overlaps[,
+  sparseMatrix(
+    i = border, j = id, x = 1, 
+    dims = c(length(wide_borders), nrow(meta))
+  )
+]
+
+colnames(counts) <- meta$DCid
+counts <- as.matrix(counts)
+```
+
+
+```{r}
+freq <- rowsum(counts, wide_borders$freq)
+chisq <- chisq.test(freq)
+obsexp <- (chisq$observed + 1) / (chisq$expected + 1)
+
+cmax <- matrixStats::colMaxs(obsexp)
+cmin <- matrixStats::colMins(obsexp)
+
+extreme10 <- unique(c(
+  which(order(order(-cmax)) <= 10),
+  which(order(order(cmin)) <= 10)
+))
+
+df <- obsexp[, extreme10]
+clust <- hclust(dist(t(df)))
+ord <- colnames(df)[clust$order]
+
+df <- reshape::melt(df)
+
+i <- match(df$X2, meta$DCid)
+df <- cbind(df, meta[i,])
+
+ggplot(df, aes(factor(X1), factor(DCid), fill = value)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    colours = div_colours,
+    rescale = ~scales::rescale_mid(.x, mid = 1)
+  ) +
+  scale_x_discrete(name = "Frequency", expand = c(0, 0)) +
+  scale_y_discrete(
+    name = NULL, expand = c(0, 0),
+    limits = ord,
+    labels = function(i) {
+      i <- match(i, meta$DCid)
+      paste0(meta$Factor[i], "\n", meta$Cell_line[i])
+    }
+  ) +
+  coord_equal()
+```
+
+## model
+
+
+```{r}
+res <- lapply(seq_len(ncol(obsexp)), function(i) {
+  df <- data.frame(x = seq_len(nrow(obsexp)), y = obsexp[,i])
+  fit0 <- lm(y ~ 1, data = df)
+  fit1 <- lm(y ~ x, data = df)
+  coef <- coef(fit1)[2]
+  ll_stat <- -2 * (as.numeric(logLik(fit0)) - as.numeric(logLik(fit1)))
+  pval <- pchisq(ll_stat, df = 1, lower.tail = FALSE)
+  data.frame(i = i, coef = coef, pval = pval)
+})
+res <- rbindlist(res)
+
+ggplot(res, aes(coef, -log10(p.adjust(pval, "fdr")))) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05), linetype = 2)
+```
+
+```{r}
+extreme10 <- unique(c(
+  which(order(order(-res$coef)) <= 10),
+  which(order(order(res$coef)) <= 10)
+))
+
+df <- obsexp[, extreme10]
+clust <- hclust(dist(t(df)))
+ord <- colnames(df)[clust$order]
+
+df <- reshape::melt(df)
+
+i <- match(df$X2, meta$DCid)
+df <- cbind(df, meta[i,])
+
+ggplot(df, aes(factor(X1), factor(DCid), fill = value)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    name = "Obs + 1 /\nExp + 1",
+    colours = div_colours,
+    rescale = ~scales::rescale_mid(.x, mid = 1)
+  ) +
+  scale_x_discrete(name = "Frequency", expand = c(0, 0)) +
+  scale_y_discrete(
+    name = NULL, expand = c(0, 0),
+    limits = ord,
+    labels = function(i) {
+      i <- match(i, meta$DCid)
+      paste0(meta$Factor[i], "\n", meta$Cell_line[i])
+    }
+  ) +
+  coord_equal()
+```
+
+## Save stuff
+
+```{r}
+wide_borders <- trim(wide_borders)
+wide_borders <- as.data.frame(wide_borders)
+
+fwrite(
+  wide_borders, file = here("references", "TAD_borders.bed"),
+  sep = "\t", row.names = FALSE, col.names = FALSE
+)
+
+
+tab <- cbind(meta, res)
+tab$fdr <- p.adjust(tab$pval, "fdr")
+fwrite(tab, file = here("references", "TAD_border_cistrome_stats.tsv"), sep = "\t")
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+# pkgs <- loadedNamespaces()
+# libTvdB::format_sessioninfo_html(pkgs)
+```

@@ -1,0 +1,328 @@
+---
+title: "TAD strength"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GENOVA)
+library(grid)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+ata  <- readRDS(here("rds", "01_ZATA_signal.rds"))
+quant <- readRDS(here("rds", "01_ZATA_quantification.rds"))
+
+pats <- c("P09_PE", "P10_PE", "P12_PE")
+
+exps <- load_experiments(resolution = 50e3, sample_subset = pats)
+exps <- sync_indices(exps)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+## Aim
+
+```{r}
+makeContent.my_rast <- function(x) {
+  x$children[[1]]$height <- convertWidth(x$children[[1]]$width, "cm")
+  x$children[[1]]$width  <- convertWidth(x$children[[1]]$width, "cm")
+  x
+}
+registerS3method("makeContent", "my_rast", makeContent.my_rast)
+
+data2layer <- function(bins, exps, lim = 200, extrafacet = "IS") {
+  pal <- myplotdefaults::scale_fill_fire()
+  pal <- pal$palette
+  
+  join <- bins[, CJ(V1 = V4, V2 = V4)]
+  join <- join[V2 >= V1]
+  
+  m <- matrix("#FFFFFF", nrow(bins), nrow(bins))
+  m[lower.tri(m)] <- NA
+  
+  mtxs <- lapply(exps, function(exp) {
+    data <- exp$MAT[join, nomatch = NULL]
+    data[, c("V1", "V2") := .(match(V1, bins$V4), match(V2, bins$V4))]
+    mtx <- m
+    mtx[data[, cbind(V1, V2)]] <- pal(pmin(data$V3, lim) / lim)
+    mtx
+  })
+  facet <- c(extrafacet, expnames(exps))
+  
+  Map(
+    matrix_as_layer,
+    m = mtxs,
+    facet = factor(expnames(exps), facet),
+    range = list(range(bins$V2, bins$V3))
+  )
+}
+
+matrix_as_layer <- function(m, facet, range) {
+  
+  rast <- rasterGrob(
+    m, width = unit(1 / sqrt(2), "npc"), height = unit(1 / sqrt(2), "npc"),
+    vp = viewport(angle = 45, y = unit(0, "npc")), interpolate = FALSE
+  )
+  grob  <- grobTree(rast, cl = "my_rast")
+  layer <- annotation_custom(
+    grob, xmin = range[1], xmax = range[2]
+  )
+  layer$data$facet <- facet
+  layer
+}
+```
+
+
+```{r}
+region <- list(chrom = "chr13", start = 50e6, end = 75e6)
+r_name <- paste0(region$chrom, ":", number_integer(region$start), "-", 
+                 number_integer(region$end))
+
+bins <- exps[[1]]$IDX
+bins <- bins[V1 %in% region$chrom]
+bins <- bins[V2 >= region$start & V3 <= region$end]
+
+colour_lim <- 400
+
+layers <- data2layer(bins, exps, lim = colour_lim)
+
+p <- ggplot(bins, aes(V2)) +
+  layers +
+  geom_point(
+    data = bins[1,],
+    aes(fill = 1, x=  Inf, y = Inf), shape = NA,
+    na.rm = TRUE
+  ) +
+  geom_text(
+    data = data.frame(facet = factor(pats, pats)),
+    aes(x = -Inf, y = Inf, label = c("P09 PE", "P10 PE", "P12 PE")),
+    hjust = 0, vjust = 1
+  ) +
+  myplotdefaults::scale_fill_fire(
+    name   = "Contacts",
+    limits = c(0, colour_lim),
+    guide = gguidance::guide_colourbar_cap(
+      cap_position = "upper",
+      barwidth = unit(5.5, "pt"),
+      barheight = unit(1.5*3 - 0.1672, "cm") + unit(5.5*3, "pt")
+    )
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    limits = c(region$start, region$end),
+    name   = r_name,
+    breaks = function(x) {
+      oob_discard(extended_breaks()(x), x)
+    },
+    labels = function(x) {
+      x <- number_format(scale = 1e-6)(x)
+      x[1] <- paste0(x[1], "Mb")
+      x
+    }
+  ) + 
+  scale_y_continuous(
+    limits = c(0, 1), guide = "none", expand = c(0, 0), name = NULL
+  ) +
+  ggh4x::facet_grid2(
+    rows = vars(facet), axes = "x", remove_labels = "x"
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(1.5, "cm"),
+    cols = unit(8, "cm")
+  ) +
+  theme(
+    axis.title.x.bottom = element_text(hjust = 0, size = 6),
+    legend.box.spacing = unit(0, "pt"),
+    strip.text = element_blank()
+  )
+
+save_svg("Fig_TAD_strength_HiC", p)
+```
+
+```{r}
+dimnames(ata$signal)[[3]] <- sample_lut[dimnames(ata$signal)[[3]]]
+```
+
+
+```{r}
+df <- reshape2::melt(ata$signal[,,pats])
+levels(df$Var3) <- gsub("_", " ", levels(df$Var3))
+
+p <- ggplot(df, aes(Var1, Var2, fill = value)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    name = "Average\nZ-score",
+    colours  = div_colours,
+    rescaler = ~ rescale_mid(.x, mid = 0),
+    labels   = number_signed,
+    guide    = guide_colourbar(
+      title.position = "top",
+      barheight = unit(50.447, "mm"),
+      barwidth = unit(5.5, "pt"),
+      label.hjust = 1
+    )
+  ) +
+  scale_x_continuous(
+    breaks = c(5, 15) * 1e5,
+    labels = c("5'", "3'"),
+    name   = NULL, 
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    breaks = c(5, 15) * 1e5,
+    labels = c("3'", "5'"),
+    name   = NULL,
+    expand = c(0, 0)
+  ) +
+  facet_grid(
+    Var3 ~  ., switch = "y"
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(1.5, "cm"),
+    cols = unit(1.5, "cm")
+  ) +
+  theme(
+    aspect.ratio = 1,
+    panel.spacing.y = unit(5.5 + 2.25, "pt"),
+    legend.box.margin = 
+    # legend.position = "bottom"
+  )
+
+save_svg("Fig_TAD_strength_ATA", p)
+```
+
+```{r}
+bootstrap <- function(x, n = 1000) {
+  colMeans(
+    matrix(
+      sample(x, length(x) * n, replace = TRUE),
+      nrow = length(x), ncol = n
+    )
+  )
+}
+
+
+df <- quant$per_TAD
+df$sample <- sample_lut[df$sample]
+
+setDT(df)
+df <- df[, .(bs = bootstrap(foreground)), by = "sample"]
+df[, c("pat", "type") := tstrsplit(sample, "_")]
+df <- df[!(type %in% c("??", "BR"))]
+
+p <- ggplot(df, aes(bs, pat, fill = type)) +
+  ggdist::stat_halfeye(
+    aes(alpha = after_stat(ggdist::cut_cdf_qi(cdf, .width = c(1, .95, .66)))),
+    geom = "slab"
+  ) +
+  scale_alpha_manual(
+    values = c(1, 0.5, 0.25),
+    guide = "none"
+  ) +
+  scale_fill_manual(
+    values = sample_colours,
+    limits = setdiff(names(sample_colours), "BR"),
+    labels = sample_type,
+    na.value = NA,
+    guide = ggh4x::guide_stringlegend(face = "bold"),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    limits = c(0, NA),
+    expand = c(0, 0, 0.05, 0),
+    name = "Average TAD Z-score\n(bootstrapped)"
+  ) +
+  scale_y_discrete(
+    expand = c(0, 0),
+    limits = rev,
+    name   = NULL
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(15 * 8, "pt"),
+    cols = unit(4, "cm")
+  ) +
+  theme(
+    panel.grid.major = thin_line
+  )
+
+save_svg("Fig_TAD_quantification", p)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

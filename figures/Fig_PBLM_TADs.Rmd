@@ -1,0 +1,598 @@
+---
+title: "Figure HBPB TADs"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GENOVA)
+library(grid)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+exps <- load_experiments(resolution = 50e3, sample_subset = c("P01_PB", "P01_LM"))
+exps <- sync_indices(exps)
+is   <- readRDS(here("rds", "01_insulation_score.rds"))
+is$exp <- sample_lut[is$exp]
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+### Functions
+
+```{r}
+# geom_triangle <- function(
+#   mapping  = NULL,
+#   data     = NULL,
+#   stat     = "identity",
+#   position = "identity",
+#   ...,
+#   na.rm = FALSE,
+#   show.legend = NA,
+#   inherit.aes = TRUE
+# ) {
+#   layer(
+#     data = data,
+#     mapping = mapping,
+#     stat = stat,
+#     geom = GeomTriangle,
+#     position = position,
+#     show.legend = show.legend,
+#     inherit.aes = inherit.aes,
+#     params = rlang::list2(
+#       na.rm = na.rm,
+#       ...
+#     )
+#   )
+# }
+# 
+# GeomTriangle <- ggproto(
+#   "GeomTriangle", GeomRaster,
+#   draw_panel = function(self, data, panel_params, coord, ...) {
+#     # browser()
+#     
+#     if (!inherits(coord, "CoordCartesian")) {
+#       stop("Only works with `coord_cartesian()`.")
+#     }
+#     data  <- coord$transform(data, panel_params)
+#     x_pos <- as.integer((data$x - min(data$x)) / resolution(data$x, FALSE))
+#     y_pos <- as.integer((data$y - min(data$y)) / resolution(data$y, FALSE))
+#     nrow  <- max(y_pos) + 1
+#     ncol  <- max(x_pos) + 1
+#     
+#     raster <- matrix(NA_character_, nrow = nrow, ncol = ncol)
+#     raster[cbind(nrow - y_pos, x_pos + 1)] <- alpha(data$fill, data$alpha)
+#     x_rng <- c(min(data$xmin, na.rm = TRUE), max(data$xmax, na.rm = TRUE))
+#     y_rng <- c(min(data$ymin, na.rm = TRUE), max(data$ymax, na.rm = TRUE))
+#     
+#     grob <- rasterGrob(
+#       raster, x = mean(x_rng), y = mean(y_rng),
+#       width  = diff(x_rng) / sqrt(2), 
+#       height = diff(y_rng) / sqrt(2),
+#       default.units = "native", interpolate = FALSE,
+#       vp = viewport(angle = 180 + 45, y = unit(0, "npc"))
+#     )
+#     grob
+#   }
+# )
+
+makeContent.my_rast <- function(x) {
+  x$children[[1]]$height <- convertWidth(x$children[[1]]$width, "cm")
+  x$children[[1]]$width  <- convertWidth(x$children[[1]]$width, "cm")
+  x
+}
+registerS3method("makeContent", "my_rast", makeContent.my_rast)
+
+data2layer <- function(bins, exps, lim = 200, extrafacet = "IS") {
+  pal <- myplotdefaults::scale_fill_fire()
+  pal <- pal$palette
+  
+  join <- bins[, CJ(V1 = V4, V2 = V4)]
+  join <- join[V2 >= V1]
+  
+  m <- matrix("#FFFFFF", nrow(bins), nrow(bins))
+  m[lower.tri(m)] <- NA
+  
+  mtxs <- lapply(exps, function(exp) {
+    data <- exp$MAT[join, nomatch = NULL]
+    data[, c("V1", "V2") := .(match(V1, bins$V4), match(V2, bins$V4))]
+    mtx <- m
+    mtx[data[, cbind(V1, V2)]] <- pal(pmin(data$V3, lim) / lim)
+    mtx
+  })
+  facet <- c(extrafacet, expnames(exps))
+  
+  Map(
+    matrix_as_layer,
+    m = mtxs,
+    facet = factor(expnames(exps), facet),
+    range = list(range(bins$V2, bins$V3))
+  )
+}
+
+matrix_as_layer <- function(m, facet, range) {
+  
+  rast <- rasterGrob(
+    m, width = unit(1 / sqrt(2), "npc"), height = unit(1 / sqrt(2), "npc"),
+    vp = viewport(angle = 45, y = unit(0, "npc")), interpolate = FALSE
+  )
+  grob  <- grobTree(rast, cl = "my_rast")
+  layer <- annotation_custom(
+    grob, xmin = range[1], xmax = range[2]
+  )
+  layer$data$facet <- facet
+  layer
+}
+```
+
+
+## Aim
+
+### TADs
+
+```{r}
+region <- list(chrom = "chr15", start = 36e6, end = 42e6)
+r_name <- paste0(region$chrom, ":", number_integer(region$start), "-", 
+                 number_integer(region$end))
+
+bins <- exps[[1]]$IDX
+bins <- bins[V1 %in% region$chrom]
+bins <- bins[V2 >= region$start & V3 <= region$end]
+
+colour_lim <- 800
+
+layers <- data2layer(bins, exps, lim = colour_lim, extrafacet = "IS")
+
+p <- ggplot(bins, aes(V2)) +
+  layers +
+  geom_point(
+    data = bins[1,],
+    aes(fill = 1, x = Inf, y = Inf), shape = NA,
+    na.rm = TRUE
+  ) +
+  geom_text(
+    data = data.frame(facet = factor(c("P01_PB" , "P01_LM"), 
+                                     levels(layers[[1]]$data$facet))),
+    aes(x = -Inf, y = Inf, label = c("P01 PB", "P01 LM")),
+    hjust = 0, vjust = 1
+  ) +
+  myplotdefaults::scale_fill_fire(
+    name = "Contacts",
+    limits = c(0, colour_lim), 
+    guide = gguidance::guide_colourbar_cap(
+      cap.position = "upper",
+      barwidth = unit(5.5, "pt"),
+      barheight = unit(4 - 0.1672, "cm")
+    )
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0), 
+    breaks = function(x) {
+      oob_discard(extended_breaks()(x), x)
+    },
+    labels = function(x) {
+      x <- number_format(scale = 1e-6)(x)
+      x[1] <- paste0(x[1], "Mb")
+      x
+    },
+    name = r_name,
+    limits = c(region$start, region$end)
+  ) +
+  scale_y_continuous(limits = c(0, 1), guide = "none", expand = c(0, 0),
+                     name = NULL) +
+  ggh4x::facet_grid2(
+    rows = vars(facet), axes = "x", remove_labels = "x"
+  ) +
+  ggh4x::force_panelsizes(
+    total_height = unit(4, "cm"),
+    cols = unit(6.472, "cm")
+  ) +
+  theme(
+    axis.title.x.bottom = element_text(hjust = 0, size = 6),
+    strip.text = element_blank(),
+    legend.box.spacing = unit(0, "pt")
+  )
+
+save_svg("Fig_PBLM_TADs_pyramid", p)
+```
+
+### Insulation
+
+```{r}
+pats <- c("P01_PB", "P01_LM", "P03_PB", "P03_LM", "P04_PB", "P04_LM")
+
+df <- is[exp %in% pats]
+df <- df[chrom == region$chrom]
+df <- df[start >= region$start & end <= region$end]
+df[, c("pat", "type") := tstrsplit(exp, "_")]
+df[, mid := (start + end) / 2]
+
+p <- ggplot(df, aes(mid, value, colour = type, group = exp)) +
+  annotate(
+    "rect", xmin =38160000, xmax = 38580000, ymin = -Inf, ymax = Inf,
+    fill = "grey90"
+  ) +
+  geom_line() +
+  scale_colour_manual(
+    name = NULL,
+    limits = c("PB", "LM"),
+    values = colorspace::darken(sample_colours[c(2, 4)], 0.2),
+    guide = ggh4x::guide_stringlegend(direction = "horizontal")
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(1, "cm"),
+    cols = unit(6.472, "cm")
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0), 
+    breaks = function(x) {
+      oob_discard(extended_breaks()(x), x)
+    },
+    labels = function(x) {
+      x <- number_format(scale = 1e-6)(x)
+      x[1] <- paste0(x[1], "Mb")
+      x
+    },
+    name = r_name,
+    limits = c(region$start, region$end)
+  ) +
+  scale_y_continuous(
+    name = "IS", breaks = c(-1, 0, 1),
+    limits = ~ c(pmin(.x[1], -1), pmax(.x[2], 1))
+  ) +
+  theme(
+    axis.title.x.bottom = element_text(hjust = 0, size = 6),
+    panel.grid.major.x = thin_line,
+    legend.position = c(0, 0),
+    legend.justification = c(0, 0),
+    legend.margin = margin(2,2,2,2)
+  )
+
+save_svg("Fig_PBLM_TADs_IS", p)
+```
+
+### Correlation
+
+```{r}
+df <- dcast.data.table(is[exp %in% pats], bin ~ exp, value.var = "value")
+
+df <- data.table(
+  x = c(df$P01_PB, df$P03_PB, df$P04_PB),
+  y = c(df$P01_LM, df$P03_LM, df$P04_LM),
+  group = rep(c("P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM", "P04 PB vs\nP04 LM"),
+              each = nrow(df))
+)
+df <- df[is.finite(df$x) & is.finite(df$y)]
+df$group <- factor(df$group, c("P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM", "P04 PB vs\nP04 LM"))
+
+rsq <- df[, cor(x, y)^2, by = "group"]
+rsq[, lab := paste0("R^2 == ", number(V1, 0.01))]
+
+lim <- range(df$x, df$y)
+
+p <- ggplot(df, aes(x, y)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey90") +
+  geom_hline(yintercept = 0, colour = "grey90") +
+  geom_vline(xintercept = 0, colour = "grey90") +
+  ggrastr::rasterise(
+    geom_point(shape = ".", alpha = 0.1),
+    dpi = 600, dev = "ragg_png"
+  ) +
+  geom_label(
+    data = rsq,
+    aes(x = Inf, y = -Inf, label = lab), 
+    parse = TRUE, inherit.aes = FALSE,
+    vjust = 0, hjust = 1, label.padding = unit(4.4, "pt"), 
+    label.size = NA, fill = NA
+  ) +
+  facet_grid(~ group) +
+  scale_x_continuous(
+    limits = lim, 
+    breaks = breaks_width(5),
+    labels = number_signed
+  ) +
+  scale_y_continuous(
+    limits = lim, 
+    breaks = breaks_width(5),
+    labels = number_signed
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(2, "cm"),
+    cols = unit(2, "cm")
+  ) +
+  theme(
+    strip.text.x.top = element_text(hjust = 0, margin = margin(b = 4.4)),
+    axis.title = element_blank()
+  )
+save_svg("Fig_PBLM_TADs_IS_correlation", p)
+```
+
+```{r}
+df <- dcast.data.table(is[exp %in% pats], bin ~ exp, value.var = "value")
+df[, c("P01_delta", "P03_delta", "P04_delta") := .(
+  P01_PB - P01_LM,
+  P03_PB - P03_LM,
+  P04_PB - P04_LM
+)]
+df <- df[is.finite(P01_delta) & is.finite(P03_delta) & is.finite(P04_delta)]
+
+rsq <- df[, .(cor = c(cor(P01_delta, P03_delta),
+                      cor(P03_delta, P04_delta),
+                      cor(P01_delta, P04_delta)),
+              facet = c("ΔP01 vs\nΔP03", "ΔP03 vs\nΔP04", "ΔP01 vs\nΔP04"))]
+
+lim <- df[, range(P01_delta, P03_delta, P04_delta)]
+lim <- c(-1, 1) * max(abs(lim))
+
+plt <- df[, .(
+  x = c(P01_delta, P03_delta, P01_delta),
+  y = c(P03_delta, P04_delta, P04_delta),
+  facet = rep(c("ΔP01 vs\nΔP03", "ΔP03 vs\nΔP04", "ΔP01 vs\nΔP04"), 
+              each = length(P01_delta))
+)]
+
+rsq <- plt[, cor(x, y)^2, by = "facet"]
+rsq[, lab := paste0("R^2 == ", number(V1, 0.01))]
+
+p <- ggplot() +
+  geom_abline(slope = 1, intercept = 0, colour = "grey90") +
+  geom_hline(yintercept = 0, colour = "grey90") +
+  geom_vline(xintercept = 0, colour = "grey90") +
+  ggrastr::rasterise(
+    geom_point(
+          data = plt,
+          aes(x, y),
+          shape = ".", alpha = 0.2
+    ),
+    dpi = 600, dev = "ragg_png"
+  ) +
+  geom_label(
+    data = rsq,
+    aes(x = Inf, y = -Inf, label = lab), 
+    parse = TRUE, inherit.aes = FALSE,
+    vjust = 0, hjust = 1, label.padding = unit(4.4, "pt"), 
+    label.size = NA, fill = NA
+  ) +
+  scale_x_continuous(
+    limits = lim, name = NULL,
+    labels = number_signed
+  ) +
+  scale_y_continuous(
+    limits = lim, name = NULL,
+    labels = number_signed
+  ) +
+  facet_wrap(~ facet) +
+  ggh4x::force_panelsizes(
+    rows = unit(2, "cm"),
+    cols = unit(2, "cm")
+  ) +
+  coord_equal() +
+  theme(
+    strip.text.x.top = element_text(hjust = 0, margin = margin(b = 4.4))
+  )
+
+save_svg("Fig_PBLM_delta_IS_correlation", p)
+```
+
+```{r}
+df <- dcast.data.table(is[exp %in% pats], bin ~ exp, value.var = "value")
+
+df <- data.table(
+  x = c(df$P01_PB, df$P01_PB, df$P03_PB, df$P01_PB, df$P03_PB, df$P04_PB),
+  y = c(df$P03_PB, df$P04_PB, df$P04_PB, df$P01_LM, df$P03_LM, df$P04_LM),
+  group = rep(c("P01 PB vs\nP03 PB", "P01 PB vs\nP04 PB", "P03 PB vs\nP04 PB", 
+                "P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM", "P04 PB vs\nP04 LM"),
+              each = nrow(df))
+)
+df <- df[is.finite(df$x) & is.finite(df$y)]
+df$group <- factor(
+  df$group, 
+  c("P01 PB vs\nP03 PB", "P01 PB vs\nP04 PB", "P03 PB vs\nP04 PB", 
+    "P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM", "P04 PB vs\nP04 LM")
+)
+
+rsq <- df[, cor(x, y)^2, by = "group"]
+rsq[, lab := paste0("R^2 == ", number(V1, 0.01))]
+
+lim <- range(df$x, df$y)
+
+ggplot(df, aes(x, y)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey90") +
+  geom_hline(yintercept = 0, colour = "grey90") +
+  geom_vline(xintercept = 0, colour = "grey90") +
+  ggrastr::rasterise(
+    geom_point(shape = ".", alpha = 0.1),
+    dpi = 600, dev = "ragg_png"
+  ) +
+  geom_label(
+    data = rsq,
+    aes(x = Inf, y = -Inf, label = lab), 
+    parse = TRUE, inherit.aes = FALSE,
+    vjust = 0, hjust = 1, label.padding = unit(4.4, "pt"), 
+    label.size = NA, fill = NA
+  ) +
+  facet_wrap(~ group, ncol = 3) +
+  scale_x_continuous(
+    # limits = lim, 
+    breaks = breaks_width(5),
+    labels = number_signed
+  ) +
+  scale_y_continuous(
+    # limits = lim, 
+    breaks = breaks_width(5),
+    labels = number_signed
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(2, "cm"),
+    cols = unit(2, "cm")
+  ) +
+  theme(
+    strip.text.x.top = element_text(hjust = 0, margin = margin(b = 4.4)),
+    axis.title = element_blank()
+  )
+```
+
+
+```{r}
+df <- dcast.data.table(is[exp %in% pats], bin ~ exp, value.var = "value")
+df[, c("P01_delta", "P03_delta", "P04_delta") := .(
+  P01_PB - P01_LM,
+  P03_PB - P03_LM,
+  P04_PB - P04_LM
+)]
+```
+
+### Loose ends
+
+```{r}
+p04 <- is[grepl("P04", exp)]
+p04 <- p04[is.finite(value)]
+
+maxchrom <- p04
+maxchrom[, mid := (start + end) / 2]
+maxchrom <- dcast(maxchrom, mid + chrom ~ exp, value.var = "value")
+maxchrom[, delta := abs(P04_PB - P04_LM)]
+maxchrom <- maxchrom[, mean(delta, na.rm = TRUE), by = "chrom"]
+maxchrom <- maxchrom[order(V1)]
+
+ggplot(p04[chrom == "chr8"], aes(x = (start + end) / 2, value, colour = exp)) +
+  geom_line(na.rm = TRUE) +
+  coord_cartesian(xlim = c(0, NA)) +
+  facet_grid(~ chrom, scales = "free_x") +
+  theme_minimal()
+```
+
+
+```{r}
+is   <- readRDS(here("rds", "01_insulation_score.rds"))
+is$exp <- sample_lut[is$exp]
+
+is[, pat := tstrsplit(exp, "_")[[1]]]
+is[, typ := tstrsplit(exp, "_")[[2]]]
+is <- is[typ %in% c("PB", "LM")]
+is[, mid := (start + end) / 2]
+
+cast <- dcast(is, chrom + mid + pat ~ typ, value.var = "value")
+cast <- cast[is.finite(LM) & is.finite(PB)]
+cast[, delta := LM - PB]
+cast <- cast[order(pat, chrom, mid)]
+
+bypat <- dcast(cast, chrom + mid ~ pat, value.var = "delta")
+bypat <- bypat[is.finite(P01) & is.finite(P03) & is.finite(P04)]
+bypat[, sign_consistant := sign(P01) == sign(P03) & sign(P01) == sign(P04)]
+bypat[, mean := (P01 + P03 + P04) / 3]
+
+
+threshold <- c(0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.5)
+runlen <- c(1, 2, 5, 10, 15, 20)
+
+grid <- expand.grid(threshold = threshold, runlen = runlen)
+
+n_regions <- lapply(seq_len(nrow(grid)), function(i) {
+  
+  thres <- grid$threshold[i]
+  len <- grid$runlen[i]
+  
+  df <- copy(bypat)
+  df[, thres := abs(mean) > thres]
+  df[, both := thres & sign_consistant]
+  rle <- vctrs::vec_unrep(as.data.frame(df)[, c("chrom", "both")])
+  rle <- as.data.table(cbind(rle$key, times = rle$times))
+  rle <- rle[both == TRUE]
+  rle <- rle[times >= len]
+  
+  data.frame(nrun = nrow(rle), nbin = sum(rle$times))
+})
+n_regions <- do.call(rbind, n_regions)
+grid <- cbind(grid, n_regions)
+
+
+ggplot(grid, aes(threshold, nrun, colour = as.factor(runlen))) +
+  geom_line() +
+  scale_y_log10()
+
+
+
+print(grid)
+```
+
+
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

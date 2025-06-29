@@ -1,0 +1,243 @@
+---
+title: "Compartment Differences"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(GENOVA)
+library(here)
+library(data.table)
+library(ggplot2)
+library(scales)
+library(EBImage)
+library(Matrix)
+library(BiocParallel)
+library(GenomicRanges)
+```
+
+### Load data
+
+```{r load_data}
+files <- list.files(
+  here("data", "hic", "pools"),
+  full.names = TRUE
+)
+names(files) <- tstrsplit(basename(files), "\\.")[[1]]
+
+centros <- readRDS(here("references", "centromeres.rds"))
+# centros <- as.data.frame(centros)
+
+chroms <- paste0("chr", c(1:22, "X"))
+si <- rtracklayer::SeqinfoForUCSCGenome("hg38")
+si <- si[chroms]
+chroms <- GRanges(seqnames(si), IRanges(1, seqlengths(si)), seqinfo = si)
+
+# exps <- Map(function(file, n) {
+#   load_contacts(file, resolution = 100e3, sample_name = n, centromeres = centros)
+# }, file = files, n = names(files))
+# exps <- sync_indices(exps)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+## Aim
+
+```{r}
+stretches <- disjoin(c(chroms, centros))
+stretches <- stretches[!overlapsAny(stretches, centros)]
+stretches <- split(stretches, seq_along(stretches))
+
+blur <- makeBrush(size = 5, shape = "Gaussian", sigma = 1.5)
+
+result <- lapply(stretches[-c(25, 27)], function(chr) {
+  out_file <- here("temp", paste0(as.character(chr), ".tsv"))
+  if (file.exists(out_file)) {
+    ans <- fread(out_file)
+    return(ans)
+  }
+  print(chr)
+  cors <- lapply(files, function(file) {
+    chr_df <- as.data.frame(chr)
+    exp <- load_contacts_subset(file, resolution = 100e3, 
+                                location = as.character(chr),
+                                centromeres = as.data.frame(centros))
+    dat <- exp$MAT
+    range <- c(bed2idx(exp$IDX, chr_df, "start"), bed2idx(exp$IDX, chr_df, "end"))
+    dat[, V1 := V1 - range[1] + 1]
+    dat[, V2 := V2 - range[1] + 1]
+    dat[!is.finite(V3), V3 := 0]
+    
+    # Blur
+    ncol <- diff(range) + 1
+    M <- as.matrix(dat[, sparseMatrix(
+      V1, V2, x = V3, symmetric = TRUE, dims = c(ncol, ncol)
+    )])
+    img <- Image(M, dim(M), "Grayscale")
+    img <- filter2(img, blur)
+    M <- imageData(img)
+    
+    # Obs/exp
+    dat <- as.data.table(reshape2::melt(M))
+    dat[, D := abs(Var1 - Var2)]
+    dat[, value := (value - mean(value)) / sd(value), by = D]
+    
+    M[dat[, cbind(Var1, Var2)]] <- dat$value
+    M[is.na(M)] <- 0
+    cor(M)
+  })
+  
+  grid <- as.data.frame(t(combn(names(cors), m = 2)))
+  grid$score <- unlist(Map(
+    function(a, b) {
+      mean(abs(cors[[a]] - cors[[b]]))
+    },
+    a = grid$V1,
+    b = grid$V2
+  ))
+  grid$chr   <- as.character(chr)
+  grid$width <- width(chr)
+  fwrite(grid, out_file, sep = "\t")
+  grid
+})
+```
+
+
+```{r}
+res <- rbindlist(result)
+res <- res[!is.na(score)]
+avgd <- res[, .(avg = sum(score * width) / sum(width)), by = c("V1", "V2")]
+
+ggplot(avgd, aes(V1, V2, fill = avg)) +
+  geom_raster() +
+  scale_x_discrete(guide = guide_axis(angle = 90))  +
+  scale_fill_GENOVA()
+```
+
+
+```{r}
+df <- avgd
+df[, c("left_pat", "left_type") := tstrsplit(V1, "_")]
+df[, c("right_pat", "right_type") := tstrsplit(V2, "_")]
+df[, same_type := left_type == right_type]
+df[, same_pat  := left_pat  == right_pat]
+
+ggplot(df[same_type == TRUE], aes(left_type, avg)) +
+  ggbeeswarm::geom_beeswarm(
+    side = 1, size = 2, cex = 2,
+    alpha = 0.5
+  ) +
+  geom_boxplot(
+    outlier.shape = NA,
+    aes(xmax = after_scale(x)),
+    position = position_nudge(-0.1)
+  ) +
+  geom_errorbar(
+    stat = "boxplot",
+    aes(xmax = after_scale(x)),
+    position = position_nudge(-0.1),
+    width = 0.25
+  ) +
+  scale_x_discrete(limits = c("HB", "PB", "LM", "PE"),
+                   name = "Tissue Type") +
+  scale_y_continuous(limits = c(0, NA), expand = c(0, 0, 0.1, 0),
+                     "Weighted average difference in correlation") +
+  theme(
+    aspect.ratio = 1 + 2/(1 + sqrt(5))
+  )
+```
+
+```{r}
+saveRDS(res, here("rds", "01_compartment_dissimilarity.rds"))
+```
+
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

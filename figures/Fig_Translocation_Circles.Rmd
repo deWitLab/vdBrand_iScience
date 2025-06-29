@@ -1,0 +1,231 @@
+---
+title: "Figure CNV breakpoints"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GENOVA)
+library(grid)
+library(GenomicRanges)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+centro <- readRDS(here("references", "centromeres.rds"))
+data   <- readRDS(here("rds", "translocation_confirmed.rds"))
+cnvs <- data.table::fread(here("processed_data", "cnvs", "res_1e+06.tsv"))
+
+pats <- setdiff(sample_lut, c("P01_??", "P02_BR"))
+
+data$sample <- sample_lut[data$sample]
+data <- data[!(sample %in% c("P01_??", "P02_BR"))]
+data$sample <- factor(data$sample, levels = pats)
+
+colnames(cnvs) <- ifelse(
+  colnames(cnvs) %in% names(sample_lut),
+  sample_lut[colnames(cnvs)], colnames(cnvs)
+)
+cnvs$`P01_??` <- NULL
+cnvs$P02_BR   <- NULL
+
+
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+### Functions
+
+```{r}
+padding <- 25e6
+chrom_width <- 0.1
+
+cnv <- copy(cnvs)
+cnv[, is_centro := overlapsAny(GRanges(chrom, IRanges(start, end)), centro)]
+
+chr_lens  <- cnvs[, .(len = max(end)), by = "chrom"]
+chr_lens  <- rbind(chr_lens, data.table(chrom = "chrZ", len = 0))
+chr_lens[, offset := cumsum(c(0, as.numeric(len) + padding))[-length(len)]]
+offset <- chr_lens[, setNames(offset, chrom)]
+ends <- chr_lens[, setNames(len, chrom)]
+
+cnv <- melt.data.table(cnv, id.vars = c("start", "end", "chrom", "is_centro"), measure.vars = pats)
+cnv[, id := rleid(chrom, is_centro, variable, value)]
+cnv <- cnv[, .(start = min(start), end = max(end)), by = c("chrom", "is_centro", "variable", "value", "id")]
+cnv[is_centro == TRUE, value := NA_real_]
+
+
+cent <- cnv[is_centro == TRUE]
+cent <- cent[, .(
+  x = c(start, start, end, end),
+  y = c(0, 1, 0, 1) * chrom_width
+), by = c("id", "chrom", "variable")]
+cent[, x := (x + offset[as.character(chrom)]) / offset["chrZ"]]
+cent[, px := sin(x * 2 * pi) * c(1 + y)]
+cent[, py := cos(x * 2 * pi) * c(1 + y)]
+
+cnv  <- cnv[is_centro == FALSE]
+cnv <- cnv[, .(x = sort(union(seq(start, end, by = 5e6), c(start, end)))),
+           by = c("chrom", "is_centro", "variable", "value", "id")]
+
+cnv <- cnv[, .(
+  x = c(x, rev(x)),
+  y = rep(c(0, 1) * chrom_width, each = length(x)) 
+), by = c("chrom", "is_centro", "variable", "value", "id")]
+
+cnv[, x := (x + offset[as.character(chrom)]) / offset["chrZ"]]
+cnv[, px := sin(x * 2 * pi) * c(1 + y)]
+cnv[, py := cos(x * 2 * pi) * c(1 + y)]
+
+ggplot(cnv, aes(px, py, group = id)) +
+  geom_polygon(aes(fill = value)) +
+  geom_polygon(data = cent, fill = "#333333") +
+  facet_wrap(~ variable) +
+  scale_fill_gradientn(
+    colours = div_colours, 
+    rescaler = ~rescale_mid(.x)
+  ) +
+  guides(x = "none", y = "none") +
+  theme(
+    aspect.ratio = 1
+  )
+```
+
+
+```{r}
+bezier <- data[label == TRUE]
+bezier[, x := (start_x + end_x) / 2]
+bezier[, xend := (start_y + end_y) / 2]
+bezier[, x := (x + offset[chr_x]) / offset["chrZ"]]
+bezier[, xend := (xend + offset[chr_y]) / offset["chrZ"]]
+bezier[, py := cos(x * 2 * pi)]
+bezier[, px := sin(x * 2 * pi)]
+bezier[, pxend := sin(xend * 2 * pi)]
+bezier[, pyend := cos(xend * 2 * pi)]
+bezier[, id := seq_len(.N)]
+bezier <- bezier[, .(px = c(px, 0, pxend), py = c(py, 0, pyend)), by = c("id", "sample")]
+colnames(bezier)[2] <- "variable"
+
+labels <- copy(chr_lens)[chrom != "chrZ"]
+labels[, lab := c(chrom[1], gsub("chr", "", chrom[-1]))]
+labels <- labels[, .(x = sort(unique(seq(0, len, by = 5e6), len))), 
+           by = c("chrom", "lab")]
+labels[, x := (x + offset[chrom]) / offset["chrZ"]]
+labels[, px := sin(x * 2 * pi) * (1 + chrom_width)]
+labels[, py := cos(x * 2 * pi) * (1 + chrom_width)] 
+
+
+p <- ggplot(cnv, aes(px, py, group = id)) +
+  geom_polygon(colour = "#333333", linewidth = 0.2) +
+  geom_polygon(aes(fill = value)) +
+  geom_polygon(data = cent, fill = "#333333") +
+  ggforce::geom_bezier(
+    data = bezier, linewidth = 0.1
+  ) +
+  geomtextpath::geom_textpath(
+    data = labels, aes(label = lab, group = lab),
+    vjust = -0.1, size = 6 / .pt, text_only = TRUE,
+    spacing = -50
+  ) +
+  facet_wrap(~ variable) +
+  scale_fill_gradientn(
+    name = expression("Log"[2]*" Ratio"),
+    colours = div_colours, 
+    rescaler = ~rescale_mid(.x),
+    labels = number_signed,
+    guide = guide_colourbar(
+      barheight = unit(5.5, "pt"), title.position = "top"
+    )
+  ) +
+  guides(x = "none", y = "none") +
+  scale_x_continuous(expand = c(0, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.2)) +
+  theme_void() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "bottom"
+  )
+
+
+save_svg("Fig_Translocation_Circles", p,
+         width = 170, height = 170)
+```
+
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

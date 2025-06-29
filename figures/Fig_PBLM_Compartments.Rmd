@@ -1,0 +1,309 @@
+---
+title: "Figure HB/PB Compartments"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GENOVA)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+exps <- load_experiments(resolution = 200e3, sample_subset = c("P01_PB", "P01_LM"))
+exps <- sync_indices(exps)
+cs   <- readRDS(here("rds", "01_compartment_scores.rds"))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+## Aim
+
+
+
+```{r}
+region <- list(chrom = "chr10", start = 50e6, end = 130e6)
+r_name <- paste0(region$chrom, ":", number_integer(region$start), "-", 
+                 number_integer(region$end))
+
+bins <- exps[[1]]$IDX
+bins <- bins[V1 %in% region$chrom]
+bins <- bins[V2 >= region$start & V3 <= region$end]
+bins$index <- seq_len(nrow(bins))
+mids <- bins[, (V2 + V3) / 2]
+
+join <- CJ(V1 = bins$V4, V2 = bins$V4)
+
+hb <- exps$P01_PB$MAT[join][!is.na(V3) & V3 > 0]
+hb[, c("V1", "V2") := list(match(V1, bins$V4), match(V2, bins$V4))]
+pb <- exps$P01_LM$MAT[join][!is.na(V3) & V3 > 0]
+pb[, c("V1", "V2") := list(match(V1, bins$V4), match(V2, bins$V4))]
+
+mat <- matrix(0, nrow(bins), nrow(bins))
+mat[hb[, cbind(V1, V2)]] <- hb$V3
+mat[pb[, cbind(V2, V1)]] <- pb$V3
+
+data <- data.frame(
+  row = mids[as.vector(row(mat))],
+  col = mids[as.vector(col(mat))],
+  value = as.vector(mat)
+)
+
+p <- ggplot(data, aes(row, col, fill = value)) + 
+  geom_raster() +
+  myplotdefaults::scale_fill_fire(
+    limits = c(0, 500), oob = oob_squish,
+    name = "Contacts",
+    guide = gguidance::guide_colourbar_cap(
+      barwidth = unit(5.5, "pt"),
+      barheight = unit(4 - 0.1672, "cm"), cap_position = "upper"
+    )
+  ) +
+  annotate(
+    "label", x = c(-Inf, Inf), y = c(Inf, -Inf), label = c("P01 PB", "P01 LM"),
+    hjust = c(0, 1), vjust = c(0, 1),
+    label.padding = unit(3, "pt"),
+    label.size = NA, fill = NA
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    labels = label_number(scale = 1e-6),
+    name   = r_name,
+    limits = c(region$start, region$end)
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    labels = label_number(scale = 1e-6),
+    trans  = "reverse",
+    name   = NULL,
+    limits = c(region$end, region$start)
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(4, "cm"),
+    cols = unit(4, "cm")
+  ) +
+  theme(
+    aspect.ratio = 1,
+    # axis.title = element_text(size = 6, hjust = 0)
+    axis.title = element_blank(),
+    axis.text.x.bottom = element_blank(),
+    legend.box.spacing = unit(0, "pt")
+  )
+
+save_svg("Fig_PBLM_Compartments_HiC", p)
+```
+
+
+```{r}
+pats <- c("P01_PB", "P03_PB", "P04_PB", "P01_LM", "P03_LM", "P04_LM")
+
+df <- cs$compart_scores
+colnames(df) <- ifelse(colnames(df) %in% names(sample_lut),
+                       sample_lut[colnames(df)], colnames(df))
+
+df <- df[chrom == region$chrom]
+df <- df[start >= region$start & end <= region$end]
+df[, mid := (start + end) / 2]
+df <- df[, c("mid", pats), with = FALSE]
+
+df <- melt.data.table(df, id.vars = "mid", measure.vars = pats)
+df[, group := match(variable, rev(pats))]
+df[, c("pat", "type") := tstrsplit(variable, "_")]
+df[, y := rescale_mid(df$value, c(-0.5, 0.5), mid = 0) + group]
+
+q <- ggplot(df, aes(mid, group = variable)) +
+  geom_rect(
+    data = data.frame(x = c(64e6, 92e6), y = c(68e6, 96e6)),
+    aes(xmin = x, xmax = y, ymin = -Inf, ymax = Inf),
+    inherit.aes = FALSE, fill = "grey90"
+  ) +
+  ggh4x::stat_difference(
+    aes(ymin = group, ymax = y, 
+        colour = after_scale(colorspace::darken(fill, 0.2))),
+    linewidth = 0.25,
+    na.rm = TRUE
+  ) +
+  geom_hline(
+    yintercept = seq_along(pats)
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    limits = c(region$start, region$end),
+    labels = label_number(scale = 1e-6),
+    name   = r_name
+  ) +
+  scale_y_continuous(
+    breaks = seq_along(pats),
+    labels = rev(pats)
+  ) +
+  scale_fill_manual(
+    values = c("#ff5c49", "#009bef"),
+    name   = "Compartment:",
+    labels = c("A,", "B"),
+    guide  = ggh4x::guide_stringlegend(title.position = "left", direction = "horizontal")
+  ) +
+  ggh4x::force_panelsizes(
+    cols = unit(4 * 1, "cm"),
+    rows = unit(4 * 2 / (1 + sqrt(5)), "cm")
+  ) +
+  theme(
+    legend.position = "top",
+    legend.justification = "right",
+    panel.grid.major.x = thin_line,
+    axis.title = element_text(size = 6, hjust = 0),
+    axis.line.x = element_blank(),
+    axis.ticks.length.x.bottom = unit(0, "pt"),
+    axis.ticks.x.bottom = element_blank()
+  )
+
+save_svg("Fig_PBLM_Compartments_CS", q)
+```
+
+### Correlation
+
+```{r}
+df <- cs$compart_scores
+colnames(df) <- ifelse(colnames(df) %in% names(sample_lut),
+                       sample_lut[colnames(df)], colnames(df))
+
+df <- data.table(
+  x = c(df$P01_PB, df$P01_PB, df$P03_PB, df$P04_PB),
+  y = c(df$P03_PB, df$P01_LM, df$P03_LM, df$P04_LM),
+  group = rep(c("P01 PB vs\nP03 PB", "P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM", "P04 PB vs\nP04 LM"),
+              each = nrow(df))
+)
+df <- df[!is.na(df$x) & !is.na(df$y)]
+df$group <- factor(df$group, c("P01 PB vs\nP03 PB", "P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM", "P04 PB vs\nP04 LM"))
+
+rsq <- df[, cor(x, y)^2, by = "group"]
+rsq[, lab := paste0("R^2 == '", number(V1, 0.01), "'")]
+
+lim <- range(df$x, df$y)
+
+p <- ggplot(df, aes(x, y)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey90") +
+  geom_hline(yintercept = 0, colour = "grey90") +
+  geom_vline(xintercept = 0, colour = "grey90") +
+  ggrastr::rasterise(
+    geom_point(shape = ".", alpha = 0.1),
+    dpi = 600, dev = "ragg_png"
+  ) +
+  geom_label(
+    data = rsq,
+    aes(x = Inf, y = -Inf, label = lab), 
+    parse = TRUE, inherit.aes = FALSE,
+    vjust = 0, hjust = 1, label.padding = unit(4.4, "pt"), 
+    label.size = NA, fill = NA
+  ) +
+  facet_grid(~ group) +
+  scale_x_continuous(limits = lim) +
+  scale_y_continuous(limits = lim) +
+  ggh4x::force_panelsizes(
+    rows = unit(2, "cm"),
+    cols = unit(2, "cm")
+  ) +
+  theme(
+    strip.text.x.top = element_text(hjust = 0, margin = margin(b = 4.4)),
+    axis.title = element_blank()
+  )
+
+save_svg("Fig_PBLM_compartment_correlations", p)
+```
+
+```{r}
+df <- cs$compart_scores
+colnames(df) <- ifelse(colnames(df) %in% names(sample_lut),
+                       sample_lut[colnames(df)], colnames(df))
+
+groups <- c("P01 PB vs\nP03 PB", "P01 PB vs\nP01 LM", "P03 PB vs\nP03 LM",
+            "P04 PB vs\nP04 LM")
+
+df <- data.table(
+  x = c(df$P01_PB, df$P01_PB, df$P03_PB, df$P04_PB),
+  y = c(df$P03_PB, df$P01_LM, df$P03_LM, df$P04_LM),
+  group = rep(groups, each = nrow(df))
+)
+df <- df[!is.na(df$x) & !is.na(df$y)]
+df$group <- factor(df$group, groups)
+
+df[, cor(x, y)^2, by = "group"]
+
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

@@ -1,0 +1,448 @@
+---
+title: "Untitled"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GENOVA)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+exps <- load_experiments(resolution = 5e5, sample_subset = c("P09_PE", "P07_PE"))
+exps <- sync_indices(exps)
+
+cs <- readRDS(here("rds", "01_compartment_scores.rds"))
+cs <- cs$compart_scores
+colnames(cs)[-c(1:4)] <- sample_lut[colnames(cs)[-c(1:4)]]
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+## Aim
+
+## 9 vs 7
+
+```{r}
+region <- list(chrom = "chr13", start = 20e6, end = 114e6)
+r_name <- paste0(region$chrom, ":", number_integer(region$start), "-",
+                 number_integer(region$end))
+exp_nms <- expnames(exps)
+
+bins <- exps[[1]]$IDX
+bins <- bins[V1 %in% region$chrom]
+bins <- bins[V2 >= region$start & V3 <= region$end]
+bins$index <- seq_len(nrow(bins))
+mids <- bins[, (V2 + V3) / 2]
+
+join <- CJ(V1 = bins$V4, V2 = bins$V4)
+
+p1 <- exps[[1]]$MAT[join][!is.na(V3) & V3 > 0]
+p1[, c("V1", "V2") := list(match(V1, bins$V4), match(V2, bins$V4))]
+p2 <- exps[[2]]$MAT[join][!is.na(V3) & V3 > 0]
+p2[, c("V1", "V2") := list(match(V1, bins$V4), match(V2, bins$V4))]
+
+mat <- matrix(0, nrow(bins), nrow(bins))
+mat[p1[, cbind(V1, V2)]] <- p1$V3
+mat[p2[, cbind(V2, V1)]] <- p2$V3
+
+data <- data.frame(
+  row = mids[as.vector(row(mat))],
+  col = mids[as.vector(col(mat))],
+  value = as.vector(mat)
+)
+
+p <- ggplot(data, aes(row, col, fill = value)) +
+  geom_raster() +
+  annotate(
+    "label", x = c(-Inf, Inf), y = c(Inf, -Inf),
+    label = gsub("_", " ", expnames(exps)),
+    hjust = c(0, 1), vjust = c(0, 1),
+    label.padding = unit(3, "pt"),
+    label.size = NA, fill = NA
+  ) +
+  myplotdefaults::scale_fill_fire(
+    limits = c(0, 2000), oob = oob_squish,
+    name = "Contacts",
+    guide = gguidance::guide_colourbar_cap(
+      barwidth  = unit(5.5, "pt"),
+      barheight = unit(4 - 0.1672, "cm"), cap_position = "upper"
+    )
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    labels = label_number(scale = 1e-6),
+    name   = r_name,
+    limits = c(region$start, region$end)
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    labels = label_number(scale = 1e-6),
+    name   = NULL,
+    trans  = "reverse",
+    limits = c(region$end, region$start)
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(4, "cm"),
+    cols = unit(4, "cm")
+  ) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.x.bottom = element_blank(),
+    legend.box.spacing = unit(0, "pt")
+  )
+
+save_svg("Fig_Compartment_Example_P09_P07", p)
+```
+
+```{r}
+df <- cbind(cs[, 1:4], cs[, expnames(exps), with = FALSE])
+df <- df[chrom == region$chrom][start >= region$start & end <= region$end]
+df[, mid := (start + end) / 2]
+df <- melt.data.table(df, "mid", exp_nms)
+
+p <- ggplot(df, aes(mid, y = value, fill = variable)) +
+  geom_area(
+    position = "identity",
+    stat = "identity",
+    alpha = 0.5
+  ) +
+  geom_line(
+    dark_outline,
+    linewidth = 0.25
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    limits = c(region$start, region$end),
+    labels = label_number(scale = 1e-6),
+    name   = r_name
+  ) +
+  scale_y_continuous(
+    limits = function(x) c(pmin(x[1], -1), pmax(x[2], 1)),
+    breaks = breaks_width(1),
+    labels = number_signed,
+    name   = "CS"
+  ) +
+  scale_fill_manual(
+    values = c("#ff5c49", "#009bef"),
+    name   = NULL,
+    labels = ~ gsub("_", " ", .x),
+    guide  = ggh4x::guide_stringlegend()
+  ) +
+  ggh4x::force_panelsizes(
+    cols = unit(4, "cm"),
+    rows = unit(2 / (1 + sqrt(5)), "cm")
+  ) +
+  theme(
+    legend.position = "top",
+    legend.justification = "right",
+    panel.grid.major.x = thin_line,
+    axis.title = element_text(size = 6, hjust = 0),
+    axis.line.x = element_blank(),
+    axis.ticks.length.x.bottom = unit(0, "pt"),
+    axis.ticks.x.bottom = element_blank()
+  )
+
+save_svg("Fig_Compartments_CS_P09_P07", p)
+```
+
+
+## 15 vs 12
+
+```{r}
+exps <- load_experiments(resolution = 5e5, sample_subset = c("P15_PE", "P12_PE"))
+exps <- sync_indices(exps)
+exp_nms <- expnames(exps)
+```
+
+### Hi-C
+
+```{r}
+region <- list(chrom = "chr10", start = 50e6, end = 133e6)
+r_name <- paste0(region$chrom, ":", number_integer(region$start), "-",
+                 number_integer(region$end))
+
+bins <- exps[[1]]$IDX
+bins <- bins[V1 %in% region$chrom]
+bins <- bins[V2 >= region$start & V3 <= region$end]
+bins$index <- seq_len(nrow(bins))
+mids <- bins[, (V2 + V3) / 2]
+
+join <- CJ(V1 = bins$V4, V2 = bins$V4)
+
+p1 <- exps[[1]]$MAT[join][!is.na(V3) & V3 > 0]
+p1[, c("V1", "V2") := list(match(V1, bins$V4), match(V2, bins$V4))]
+p2 <- exps[[2]]$MAT[join][!is.na(V3) & V3 > 0]
+p2[, c("V1", "V2") := list(match(V1, bins$V4), match(V2, bins$V4))]
+
+mat <- matrix(0, nrow(bins), nrow(bins))
+mat[p1[, cbind(V1, V2)]] <- p1$V3
+mat[p2[, cbind(V2, V1)]] <- p2$V3
+
+data <- data.frame(
+  row = mids[as.vector(row(mat))],
+  col = mids[as.vector(col(mat))],
+  value = as.vector(mat)
+)
+
+p <- ggplot(data, aes(row, col, fill = value)) +
+  geom_raster() +
+  annotate(
+    "label", x = c(-Inf, Inf), y = c(Inf, -Inf),
+    label = gsub("_", " ", exp_nms),
+    hjust = c(0, 1), vjust = c(0, 1),
+    label.padding = unit(3, "pt"),
+    label.size = NA, fill = NA
+  ) +
+  myplotdefaults::scale_fill_fire(
+    limits = c(0, 2000), oob = oob_squish,
+    name = "Contacts",
+    guide = gguidance::guide_colourbar_cap(
+      barwidth  = unit(5.5, "pt"),
+      barheight = unit(4 - 0.1672, "cm"), cap_position = "upper"
+    )
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    labels = label_number(scale = 1e-6),
+    name   = r_name,
+    limits = c(region$start, region$end)
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    labels = label_number(scale = 1e-6),
+    name   = NULL,
+    trans  = "reverse",
+    limits = c(region$end, region$start)
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(4, "cm"),
+    cols = unit(4, "cm")
+  ) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.x.bottom = element_blank(),
+    legend.box.spacing = unit(0, "pt")
+  )
+
+save_svg("Fig_Compartment_Example_P15_P12", p)
+```
+
+```{r}
+df <- cbind(cs[, 1:4], cs[, expnames(exps), with = FALSE])
+df <- df[chrom == region$chrom][start >= region$start & end <= region$end]
+df[, mid := (start + end) / 2]
+df <- melt.data.table(df, "mid", exp_nms)
+
+p <- ggplot(df, aes(mid, y = value, fill = variable)) +
+  geom_area(
+    position = "identity",
+    stat = "identity",
+    alpha = 0.5
+  ) +
+  geom_line(
+    dark_outline,
+    linewidth = 0.25
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    limits = c(region$start, region$end),
+    labels = label_number(scale = 1e-6),
+    name   = r_name
+  ) +
+  scale_y_continuous(
+    limits = function(x) c(pmin(x[1], -1), pmax(x[2], 1)),
+    breaks = breaks_width(1),
+    labels = number_signed,
+    name   = "CS"
+  ) +
+  scale_fill_manual(
+    values = c("#ff5c49", "#009bef"),
+    name   = NULL,
+    labels = ~ gsub("_", " ", .x),
+    guide  = ggh4x::guide_stringlegend()
+  ) +
+  ggh4x::force_panelsizes(
+    cols = unit(4, "cm"),
+    rows = unit(2 / (1 + sqrt(5)), "cm")
+  ) +
+  theme(
+    legend.position = "top",
+    legend.justification = "right",
+    panel.grid.major.x = thin_line,
+    axis.title = element_text(size = 6, hjust = 0),
+    axis.line.x = element_blank(),
+    axis.ticks.length.x.bottom = unit(0, "pt"),
+    axis.ticks.x.bottom = element_blank()
+  )
+
+save_svg("Fig_Compartments_CS_P15_P12", p)
+```
+
+
+```{r}
+cs <- readRDS(here("rds", "01_compartment_scores.rds"))
+cs <- cs$compart_scores
+colnames(cs)[-c(1:4)] <- sample_lut[colnames(cs)[-c(1:4)]]
+cors <- cs
+cors$`P01_??` <- NULL
+cors$P02_BR <- NULL
+
+m <- as.matrix(as.data.frame(cors)[-c(1:4)])
+keep <- is.finite(rowSums(m))
+
+cors <- cors[keep]
+
+f <- function(x) {
+  x <- as.matrix(as.data.frame(x))
+  x <- cor(x)
+  reshape2::melt(x)
+}
+
+cors <- cors[, c(f(as.list(.SD)[-c(1:3)]), list(n = .N)), by = "chrom"]
+cors[, value := value^2]
+wcors <- cors[, sum(value * n) / sum(n), by = c("Var1", "Var2")]
+
+order <- setdiff(colnames(cs)[-c(1:4)], c("P01_??", "P02_BR"))
+pat <- tstrsplit(order, "_")[[1]]
+typ <- factor(tstrsplit(order, "_")[[2]], c("HB", "PB", "LM", "PE"))
+order <- order[order(typ, pat)]
+
+p <- ggplot(wcors[Var1 != Var2], aes(Var1, Var2, fill = V1)) +
+  geom_raster() +
+  geom_rect(
+    data = data.frame(
+      xmin = c( 0.5,  2.5, 7.5,  10.5),
+      xmax = c( 2.5,  7.5, 10.5, 20.5),
+      ymin = c(18.5, 18.5, 13.5,  0.5),
+      ymax = c(20.5, 13.5, 10.5, 10.5),
+      type = c("HB", "PB", "LM", "PE")
+    ),
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, colour = type),
+    fill = NA, inherit.aes = FALSE
+  ) +
+  scale_x_discrete(
+    limits = order,
+    guide = ggh4x::guide_axis_nested(delim = "_", ),
+    name = NULL
+  ) +
+  scale_y_discrete(
+    limits = rev(order),
+    guide = ggh4x::guide_axis_nested(delim = "_"),
+    name = NULL
+  ) +
+  scale_colour_manual(
+    values = sample_colours,
+    limits = levels(typ),
+    guide = "none"
+  ) +
+  scale_fill_viridis_c(
+    breaks = breaks_width(0.1),
+    guide = guide_colourbar(
+      title = expression("Weighted "*R^2),
+      title.position = "top",
+      barwidth = unit(6, "pt") * 20,
+      barheight = unit(5.5, "pt")
+    )
+  ) +
+  coord_equal() +
+  ggh4x::force_panelsizes(
+    rows = unit(6, "pt") * 20,
+    cols = unit(6, "pt") * 20
+  ) +
+  theme(
+    axis.text.x = element_text(margin = margin(t = 3, b = 3), angle = 90, vjust = 0.5),
+    axis.text.y = element_text(margin = margin(l = 3, r = 3)),
+    legend.position = "top"
+  )
+
+save_svg("Fig_Compartments_Correlation_Matrix", p)
+```
+
+```{r}
+df <- wcors[as.integer(Var1) > as.integer(Var2)]
+df[, v1 := tstrsplit(Var1, "_")[[2]]]
+df[, v2 := tstrsplit(Var2, "_")[[2]]]
+df <- df[v1 == v2]
+
+df[, mean(V1), by = v1]
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

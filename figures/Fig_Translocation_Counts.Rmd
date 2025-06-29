@@ -1,0 +1,266 @@
+---
+title: "Figure CNV breakpoints"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(data.table)
+library(GENOVA)
+library(grid)
+library(GenomicRanges)
+source(here("rscripts", "project_functions.R"))
+```
+
+### Load data
+
+```{r load_data}
+# centro <- readRDS(here("references", "centromeres.rds"))
+data   <- readRDS(here("rds", "translocation_confirmed.rds"))
+# cnvs <- data.table::fread(here("processed_data", "cnvs", "res_1e+06.tsv"))
+
+pats <- setdiff(sample_lut, c("P01_??", "P02_BR"))
+
+data$sample <- sample_lut[data$sample]
+data <- data[!(sample %in% c("P01_??", "P02_BR"))]
+data$sample <- factor(data$sample, levels = pats)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+set_figure_theme()
+```
+
+### Functions
+
+```{r}
+df <- data[label == TRUE]
+df <- df[, .(N = .N), by = "sample"]
+df <- df[.(sample = pats), on = "sample"]
+df[is.na(N), N := 0]
+df[, c("pat", "type") := tstrsplit(sample, "_")]
+
+p <- ggplot(df, aes(N, type, fill = type)) +
+  geom_boxplot(
+    aes(colour = after_scale(colorspace::darken(fill, 0.2)),
+        ymax = after_scale(y)),
+    position = position_nudge(y = -0.2),
+    width = 0.4
+  ) +
+  geom_errorbar(
+    aes(colour = after_scale(colorspace::darken(fill, 0.2)),
+        ymax = after_scale(y)),
+    stat = "boxplot",
+    position = position_nudge(y = -0.2),
+    width = 0.2
+  ) +
+  geom_path(
+    aes(group = pat)
+  ) +
+  ggbeeswarm::geom_beeswarm(
+    aes(colour = after_scale(colorspace::darken(fill, 0.2))),
+    shape = 21
+  ) +
+  scale_fill_manual(values = sample_colours, guide = "none") +
+  scale_y_discrete(
+    limits = c("PE", "LM", "PB", "HB"),
+    labels = c("Pleural Effusion", "Liver Metastasis", "Primary Breast", 
+               "Healthy Breast")
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(3, "cm"),
+    cols = unit(4.765, "cm")
+  ) +
+  labs(
+    x = "# Breakpoints",
+    y = NULL
+  ) +
+  theme(
+    axis.line.x.bottom = element_blank(),
+    axis.ticks.length.x.bottom = unit(0, "pt"),
+    axis.ticks.x.bottom = element_blank(),
+    axis.text.y.left = element_text(hjust = 0),
+    panel.grid.major.x = thin_line,
+    panel.background = element_rect(fill = NA, colour = "grey50")
+  )
+
+save_svg("Fig_Translocation_Count", p)
+```
+
+
+```{r}
+# good_chroms <- paste0("chr", c(1:22, "X"))
+# 
+# df <- data[label == TRUE]
+# df$chr_x <- match(df$chr_x, good_chroms)
+# df$chr_y <- match(df$chr_y, good_chroms)
+# df[, c("chr_x", "chr_y") := .(pmin(chr_x, chr_y), pmax(chr_x, chr_y))]
+# df <- df[, .(n = 1), by = c("sample", "chr_x", "chr_y")]
+# df[, n := 1]
+# smmry <- df
+# 
+# df <- df[CJ(chr_x = seq_along(good_chroms), 
+#             chr_y = seq_along(good_chroms)), 
+#          on = c("chr_x", "chr_y")]
+# 
+# df[, c("chr_x", "chr_y") := .(pmin(chr_x, chr_y), pmax(chr_x, chr_y))]
+# df[is.na(n), n := 0]
+# df <- df[, .(n = sum(n)), by = c("chr_x", "chr_y")]
+# df$id <- seq_len(nrow(df))
+# 
+# facet_vars <- factor(c("triangle", "summary"), c("triangle", "summary"))
+# 
+# lab_df <- df
+# lab_df[, c("x", "y") := GENOVA:::.transform_xy_coords(chr_x, chr_y)]
+# lab_df <- lab_df[n > 0]
+# lab_df$facet <- facet_vars[1]
+# 
+# df <- df[, .(
+#   x = c(-1, -1, 1,  1) * 0.5 + chr_x,
+#   y = c(-1,  1, 1, -1) * 0.5 + chr_y,
+#   n = n[1]
+# ), by = "id"]
+# df[, c("x", "y") := GENOVA:::.transform_xy_coords(x, y)]
+# df <- df[y > -0.01]
+# df$facet <- facet_vars[1]
+# 
+# smmry <- data.table(
+#   chr    = c(smmry$chr_x, smmry$chr_y),
+#   sample = smmry$sample[rep(seq_along(smmry$sample), 2)]
+# )
+# smmry[, c("pat", "type") := tstrsplit(sample, "_")]
+# smmry <- smmry[, .(n = .N), by = c("chr", "type")]
+# smmry$facet <- facet_vars[2]
+# smmry$type <- factor(smmry$type, c("PB", "LM", "PE"))
+# 
+# 
+# p <- ggplot(df, aes(-y, -x, fill = n, group = id)) +
+#   geom_polygon(colour = "black", linewidth = 0.25) +
+#   geom_text(
+#     data = lab_df,
+#     aes(label = n),
+#     colour = ifelse(lab_df$n > 2, "white", "black")
+#   ) +
+#   myplotdefaults::scale_fill_ice(
+#     limits = c(0, 4), oob = oob_squish,
+#     guide = "none"
+#   ) +
+#   ggnewscale::new_scale_fill() +
+#   geom_col(
+#     data = smmry, width = 2/(1 + sqrt(5)),
+#     aes(y = -chr, x = n, fill = type,
+#         colour = after_scale(colorspace::darken(fill, 0.2))),
+#     inherit.aes = FALSE,
+#     orientation = "y",
+#     position = position_stack(reverse = TRUE)
+#   ) +
+#   scale_fill_manual(
+#     name   = "Sample type",
+#     values = sample_colours,
+#     guide  = ggh4x::guide_stringlegend(),
+#     labels = c("Primary Breast", "Liver Metastasis", "Pleural Effusion")
+#   ) +
+#   ggh4x::facet_grid2(~ facet, scales = "free", independent = "y",
+#              space = "free_x") +
+#   ggh4x::scale_y_facet(
+#     COL == 1, position = 'right', limits = c(-23.5, -0.5),
+#     expand = c(0, 0), breaks = -1:-23,
+#     labels = c(1:22, "X")
+#   ) +
+#   ggh4x::scale_y_facet(
+#     COL == 2, position = "left", limits = c(-23.5, -0.5),
+#     expand = c(0, 0), labels = NULL, breaks = -1:-23
+#   ) +
+#   ggh4x::scale_x_facet(
+#     COL == 1, guide = "none", expand = c(0, 0), breaks = NULL
+#   ) +
+#   ggh4x::scale_x_facet(
+#     COL == 2, expand = c(0, 0, 0.05, 0)
+#   ) +
+#   labs(
+#     y = NULL,
+#     x = "# Rearrangements"
+#   ) +
+#   ggh4x::force_panelsizes(
+#     cols = unit(c(3, 6), "cm"),
+#     rows = unit(6, "cm")
+#   ) +
+#   theme(
+#     axis.text.y.right = element_text(hjust = 0.5),
+#     panel.spacing.x = unit(2.2, "pt"),
+#     panel.grid.major.x = thin_line,
+#     strip.text = element_blank()
+#   )
+# 
+# save_svg("Fig_Translocation_Count", p)
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
